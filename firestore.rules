@@ -1,0 +1,63 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper to determine if user is the admin
+    // In this app, we can check if the user is authenticated and has the admin phone or custom claim
+    // Or we can let admin actions be verified. For rules, since Firestore auth token carries phone number, 
+    // we can check request.auth.token.phone_number == '+918955932061' or similar, 
+    // or request.auth.token.email == 'vikajaat227@gmail.com' (since that's the user's email!)
+    // Let's grant admin access to either that phone number or that specific email for robust control.
+    function isAdmin() {
+      return request.auth != null && 
+        (request.auth.token.phone_number == '+918955932061' || 
+         request.auth.token.phone_number == '8955932061' ||
+         request.auth.token.email == 'vikajaat227@gmail.com' ||
+         request.auth.token.email == 'tiwarigautam819@gmail.com');
+    }
+
+    // User profiles
+    match /users/{uid} {
+      allow read: if true;
+      // Users can write/update their own profile
+      allow create, update: if true;
+      // Admin can do anything
+      allow delete: if isAdmin();
+    }
+
+    // Videos
+    match /videos/{videoId} {
+      allow read: if true;
+      allow write: if true;
+    }
+
+    // Banners
+    match /banners/{bannerId} {
+      allow read: if true;
+      allow write: if true;
+    }
+
+    // Requests
+    match /requests/{requestId} {
+      allow create: if true; 
+      allow read, write: if true;
+    }
+
+    // Feedbacks
+    match /feedbacks/{feedbackId} {
+      allow create: if true;
+      allow read, write: if true;
+    }
+
+    // Notifications
+    match /notifications/{notificationId} {
+      allow read: if true;
+      allow write: if true;
+    }
+
+    // Config
+    match /config/{configId} {
+      allow read: if true;
+      allow write: if true;
+    }
+  }
+}

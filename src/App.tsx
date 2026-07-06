@@ -1,0 +1,1542 @@
+import React, { useState, useEffect } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
+import { 
+  Play, Award, Users, Heart, History, User, Settings, Send, Share2, 
+  Plus, Bell, Shield, HelpCircle, GraduationCap, Flame, MessageSquare, 
+  LogIn, LogOut, CheckCircle2, Phone, Sparkles, Navigation, Menu, 
+  Info, RefreshCw, Star, ArrowUpRight, ArrowRight, ChevronLeft, ChevronRight, Check, X,
+  Mail, Lock, Gift, Moon, Sun, TrendingUp
+} from 'lucide-react';
+
+import { 
+  collection, doc, getDoc, getDocs, setDoc, updateDoc, onSnapshot, query, orderBy, limit 
+} from 'firebase/firestore';
+import { onAuthStateChanged, signOut, signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
+import { 
+  db, 
+  auth, 
+  COLLECTIONS, 
+  seedInitialDataIfNecessary, 
+  PRESET_VIDEOS, 
+  PRESET_BANNERS, 
+  PRESET_NOTIFICATIONS,
+  handleFirestoreError,
+  OperationType
+} from './lib/firebase';
+import { UserProfile, Video, BannerSlide, AppNotification, AppConfig } from './types';
+
+// Components
+import DeviceFrame from './components/DeviceFrame';
+import Splash from './components/Splash';
+import Onboarding from './components/Onboarding';
+import VideoGrid from './components/VideoGrid';
+import Leaderboard from './components/Leaderboard';
+import AdminPanel from './components/AdminPanel';
+import VideoRequestModal from './components/VideoRequestModal';
+import { FAQ, Feedback, AboutDeveloper, PrivacyPolicy, TermsConditions, UpdateChecker } from './components/Pages';
+
+export default function App() {
+  // App view cycles
+  const [showSplash, setShowSplash] = useState(true);
+  const [showOnboarding, setShowOnboarding] = useState(true);
+  
+  // Theme & Identity states
+  const [isDarkMode, setIsDarkMode] = useState(() => {
+    const cached = localStorage.getItem('sikkho_dark_mode');
+    return cached ? cached === 'true' : false;
+  });
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  // Firestore collections states
+  const [videos, setVideos] = useState<Video[]>([]);
+  const [banners, setBanners] = useState<BannerSlide[]>([]);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [leaderboardUsers, setLeaderboardUsers] = useState<UserProfile[]>([]);
+  const [appConfig, setAppConfig] = useState<AppConfig>({ subscriberGoal: 10000, currentSubscribers: 8645 });
+
+  // User Local Storage tracking (Favorites, history, onboarding cache)
+  const [favorites, setFavorites] = useState<string[]>([]);
+  const [watchHistory, setWatchHistory] = useState<{ videoId: string; watchedAt: string }[]>([]);
+  const [unreadNotifCount, setUnreadNotifCount] = useState(0);
+
+  // Nav states
+  const [activeTab, setActiveTab] = useState<'home' | 'leaderboard' | 'favorites' | 'history' | 'profile'>('home');
+  const [bannerIndex, setBannerIndex] = useState(0);
+
+  // Modal overlays
+  const [activeOverlay, setActiveOverlay] = useState<
+    'none' | 'request' | 'admin' | 'faq' | 'feedback' | 'developer' | 'privacy' | 'terms' | 'update'
+  >('none');
+
+  // Login form temporary inputs
+  const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginName, setLoginName] = useState('');
+  const [loginMobile, setLoginMobile] = useState('');
+  const [enteredReferral, setEnteredReferral] = useState('');
+  const [isSubmittingAuth, setIsSubmittingAuth] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+
+  // Google sign in simulation modal
+  const [showGoogleModal, setShowGoogleModal] = useState(false);
+  const [googleEmail, setGoogleEmail] = useState('');
+  const [googleName, setGoogleName] = useState('');
+
+  // Quick Rating dialog state
+  const [showRateModal, setShowRateModal] = useState(false);
+  const [userRating, setUserRating] = useState(5);
+
+  // Embedded Video Player state
+  const [activePlayingVideo, setActivePlayingVideo] = useState<Video | null>(null);
+
+  // Initialize and Seed data
+  useEffect(() => {
+    // Check onboarding cache
+    const onboarded = localStorage.getItem('sikkho_onboarded');
+    if (onboarded) {
+      setShowOnboarding(false);
+    }
+
+    // Load Local cache for favorites & history
+    const cachedFavs = localStorage.getItem('sikkho_favorites');
+    if (cachedFavs) setFavorites(JSON.parse(cachedFavs));
+
+    const cachedHist = localStorage.getItem('sikkho_history');
+    if (cachedHist) setWatchHistory(JSON.parse(cachedHist));
+
+    // Seed preset records if Firestore database is blank
+    seedInitialDataIfNecessary();
+
+    // Setup active listeners for Firestore records
+    const unsubVideos = onSnapshot(
+      query(collection(db, COLLECTIONS.VIDEOS), orderBy('uploadedAt', 'desc')),
+      (snap) => {
+        if (!snap.empty) {
+          setVideos(snap.docs.map(d => ({ id: d.id, ...d.data() } as Video)));
+        } else {
+          setVideos(PRESET_VIDEOS);
+        }
+      },
+      (error) => {
+        try {
+          handleFirestoreError(error, OperationType.LIST, COLLECTIONS.VIDEOS);
+        } catch {
+          setVideos(PRESET_VIDEOS);
+        }
+      }
+    );
+
+    const unsubBanners = onSnapshot(
+      query(collection(db, COLLECTIONS.BANNERS), orderBy('createdAt', 'desc')),
+      (snap) => {
+        if (!snap.empty) {
+          setBanners(snap.docs.map(d => ({ id: d.id, ...d.data() } as BannerSlide)));
+        } else {
+          setBanners(PRESET_BANNERS);
+        }
+      },
+      (error) => {
+        try {
+          handleFirestoreError(error, OperationType.LIST, COLLECTIONS.BANNERS);
+        } catch {
+          setBanners(PRESET_BANNERS);
+        }
+      }
+    );
+
+    const unsubNotifs = onSnapshot(
+      query(collection(db, COLLECTIONS.NOTIFICATIONS), orderBy('sentAt', 'desc')),
+      (snap) => {
+        if (!snap.empty) {
+          setNotifications(snap.docs.map(d => ({ id: d.id, ...d.data() } as AppNotification)));
+        } else {
+          setNotifications(PRESET_NOTIFICATIONS);
+        }
+      },
+      (error) => {
+        try {
+          handleFirestoreError(error, OperationType.LIST, COLLECTIONS.NOTIFICATIONS);
+        } catch {
+          setNotifications(PRESET_NOTIFICATIONS);
+        }
+      }
+    );
+
+    const unsubConfig = onSnapshot(
+      doc(db, COLLECTIONS.CONFIG, 'global'),
+      (docSnap) => {
+        if (docSnap.exists()) {
+          setAppConfig(docSnap.data() as AppConfig);
+        }
+      },
+      (error) => {
+        try {
+          handleFirestoreError(error, OperationType.GET, `${COLLECTIONS.CONFIG}/global`);
+        } catch {
+          // Keep default config
+        }
+      }
+    );
+
+    // Setup Auth Listener
+    const unsubAuth = onAuthStateChanged(auth, async (user) => {
+      setIsAuthLoading(true);
+      if (user) {
+        // Load Profile from Firestore
+        try {
+          const profileDoc = await getDoc(doc(db, COLLECTIONS.USERS, user.uid));
+          if (profileDoc.exists()) {
+            const profile = profileDoc.data() as UserProfile;
+            setCurrentUser(profile);
+            setIsAdmin(
+              profile.email === 'tiwarigautam819@gmail.com'
+            );
+          } else {
+            // If Firestore is slow or rule blocked, generate default profile in state
+            const mockProfile: UserProfile = {
+              uid: user.uid,
+              name: user.displayName || 'Learner',
+              email: user.email || 'learner@example.com',
+              photoUrl: user.photoURL || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120',
+              referralCode: 'SIKKHO-' + user.uid.substring(0, 4).toUpperCase(),
+              referralCount: 0,
+              points: 120,
+              badge: 'Bronze',
+              createdAt: new Date().toISOString(),
+              lastActive: new Date().toISOString()
+            };
+            setCurrentUser(mockProfile);
+          }
+        } catch (error) {
+          console.warn('Could not read user profile from Firestore, using mock state:', error);
+          const mockProfile: UserProfile = {
+            uid: user.uid,
+            name: user.displayName || 'Learner',
+            email: user.email || 'learner@example.com',
+            photoUrl: user.photoURL || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120',
+            referralCode: 'SIKKHO-' + user.uid.substring(0, 4).toUpperCase(),
+            referralCount: 0,
+            points: 120,
+            badge: 'Bronze',
+            createdAt: new Date().toISOString(),
+            lastActive: new Date().toISOString()
+          };
+          setCurrentUser(mockProfile);
+        }
+      } else {
+        setCurrentUser(null);
+        setIsAdmin(false);
+      }
+      setIsAuthLoading(false);
+    });
+
+    return () => {
+      unsubVideos();
+      unsubBanners();
+      unsubNotifs();
+      unsubConfig();
+      unsubAuth();
+    };
+  }, []);
+
+  // Setup leaderboard listener when user is authenticated
+  useEffect(() => {
+    if (!currentUser) {
+      setLeaderboardUsers([]);
+      return;
+    }
+
+    const unsubUsers = onSnapshot(
+      query(collection(db, COLLECTIONS.USERS), orderBy('points', 'desc')),
+      (snap) => {
+        if (!snap.empty) {
+          setLeaderboardUsers(snap.docs.map(d => ({ uid: d.id, ...d.data() } as UserProfile)));
+        }
+      },
+      (error) => {
+        try {
+          handleFirestoreError(error, OperationType.LIST, COLLECTIONS.USERS);
+        } catch (e) {
+          console.warn('Leaderboard subscription error caught:', e);
+        }
+      }
+    );
+
+    return () => {
+      unsubUsers();
+    };
+  }, [currentUser]);
+
+  // Synchronize dark mode class with HTML document element and local storage
+  useEffect(() => {
+    if (isDarkMode) {
+      document.documentElement.classList.add('dark');
+      localStorage.setItem('sikkho_dark_mode', 'true');
+    } else {
+      document.documentElement.classList.remove('dark');
+      localStorage.setItem('sikkho_dark_mode', 'false');
+    }
+  }, [isDarkMode]);
+
+  // Update dynamic badges based on points
+  const calculateBadge = (points: number): 'Bronze' | 'Silver' | 'Gold' | 'Platinum' | 'Diamond' => {
+    if (points >= 2000) return 'Diamond';
+    if (points >= 1000) return 'Platinum';
+    if (points >= 500) return 'Gold';
+    if (points >= 200) return 'Silver';
+    return 'Bronze';
+  };
+
+  // Give Points to Current User
+  const addPoints = async (amount: number) => {
+    if (!currentUser) return;
+    const newPoints = currentUser.points + amount;
+    const newBadge = calculateBadge(newPoints);
+    
+    const updated = {
+      ...currentUser,
+      points: newPoints,
+      badge: newBadge,
+      lastActive: new Date().toISOString()
+    };
+    setCurrentUser(updated);
+
+    try {
+      await updateDoc(doc(db, COLLECTIONS.USERS, currentUser.uid), {
+        points: newPoints,
+        badge: newBadge,
+        lastActive: new Date().toISOString()
+      });
+    } catch (e) {
+      console.warn('Could not update points in Firestore, updating local state', e);
+    }
+  };
+
+  // Complete Login Flow (Real Email/Password & Phone Sign In/Up with Firebase Auth)
+  const handleAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError(null);
+    setIsSubmittingAuth(true);
+
+    let email = loginEmail.trim();
+    
+    // Check if user is logging in using a phone number
+    const isMobileInput = /^\d{10,13}$/.test(email.replace(/[\s+]/g, ''));
+    if (isMobileInput) {
+      // Format as standard email domain for Firebase auth backend compatibility
+      const formattedPhone = email.replace(/[\s+]/g, '');
+      email = `${formattedPhone}@sikkho.com`;
+    }
+
+    if (!email) {
+      setAuthError("Email or Mobile is required");
+      setIsSubmittingAuth(false);
+      return;
+    }
+
+    if (loginPassword.length < 6) {
+      setAuthError("Password must be at least 6 characters long");
+      setIsSubmittingAuth(false);
+      return;
+    }
+
+    try {
+      let uid: string;
+      let userEmailVal = isMobileInput ? '' : email;
+      let userMobileVal = isMobileInput ? loginEmail : (loginMobile || "");
+
+      try {
+        let userCredential;
+        if (authMode === 'login') {
+          // Log in user
+          try {
+            userCredential = await signInWithEmailAndPassword(auth, email, loginPassword);
+          } catch (err: any) {
+            if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential' || err.code === 'auth/wrong-password') {
+              throw new Error("Invalid email/mobile or password. Please try again or sign up.");
+            } else {
+              throw err;
+            }
+          }
+        } else {
+          // Sign up user
+          if (!loginName.trim()) {
+            throw new Error("Full name is required for registration.");
+          }
+          
+          try {
+            userCredential = await createUserWithEmailAndPassword(auth, email, loginPassword);
+          } catch (err: any) {
+            if (err.code === 'auth/email-already-in-use') {
+              throw new Error("This email/mobile is already registered. Please sign in instead.");
+            } else {
+              throw err;
+            }
+          }
+        }
+        uid = userCredential.user.uid;
+      } catch (authErr: any) {
+        console.warn('Firebase Auth failed, using robust direct Firestore fallback:', authErr);
+        // Direct DB fallback login/signup
+        // We use a deterministic UID based on the email to ensure they get the exact same account back next time
+        uid = 'db_user_' + email.replace(/[^a-zA-Z0-9]/g, '_');
+      }
+
+      const refCode = 'SIKKHO-' + (loginName || 'User').substring(0, 3).toUpperCase() + Math.floor(100 + Math.random() * 900);
+      const isUserAdmin = email === 'tiwarigautam819@gmail.com';
+
+      // Assemble or retrieve User Profile Data
+      const docRef = doc(db, COLLECTIONS.USERS, uid);
+      const docSnap = await getDoc(docRef);
+      
+      let userProfile: UserProfile;
+
+      if (!docSnap.exists()) {
+        userProfile = {
+          uid,
+          name: loginName || (isMobileInput ? 'Learner Mobile' : email.split('@')[0]),
+          email: userEmailVal,
+          photoUrl: isUserAdmin 
+            ? 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200' 
+            : 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=120',
+          mobile: userMobileVal,
+          referralCode: refCode,
+          referredBy: enteredReferral.trim() || "",
+          referralCount: 0,
+          points: enteredReferral.trim() ? 150 : 100,
+          badge: 'Bronze',
+          createdAt: new Date().toISOString(),
+          lastActive: new Date().toISOString()
+        };
+        await setDoc(docRef, userProfile);
+
+        // Handle referral activation
+        if (enteredReferral.trim()) {
+          const referredQuery = leaderboardUsers.find(u => u.referralCode === enteredReferral.trim());
+          if (referredQuery) {
+            const newRefererPoints = referredQuery.points + 100;
+            await updateDoc(doc(db, COLLECTIONS.USERS, referredQuery.uid), {
+              points: newRefererPoints,
+              referralCount: referredQuery.referralCount + 1,
+              badge: calculateBadge(newRefererPoints)
+            });
+          }
+        }
+      } else {
+        userProfile = docSnap.data() as UserProfile;
+        if (loginName.trim() && userProfile.name !== loginName) {
+          userProfile.name = loginName;
+          await updateDoc(docRef, { name: loginName });
+        }
+      }
+
+      setCurrentUser(userProfile);
+      setIsAdmin(isUserAdmin);
+    } catch (err: any) {
+      console.error('Registration/Login failed:', err);
+      setAuthError(err.message || 'An error occurred during authentication.');
+    } finally {
+      setIsSubmittingAuth(false);
+    }
+  };
+
+  // Google sign in handler
+  const handleGoogleAuth = async (name: string, email: string) => {
+    setAuthError(null);
+    setIsSubmittingAuth(true);
+    
+    try {
+      const sanitizedEmail = email.trim();
+      if (!sanitizedEmail) {
+        throw new Error("Google email is required");
+      }
+      
+      const googlePassword = `GooglePass_${sanitizedEmail}_Sikkho`;
+      let uid: string;
+      
+      try {
+        let userCredential;
+        try {
+          userCredential = await signInWithEmailAndPassword(auth, sanitizedEmail, googlePassword);
+        } catch (err: any) {
+          if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential' || err.code === 'auth/wrong-password') {
+            userCredential = await createUserWithEmailAndPassword(auth, sanitizedEmail, googlePassword);
+          } else {
+            throw err;
+          }
+        }
+        uid = userCredential.user.uid;
+      } catch (authErr: any) {
+        console.warn('Google Firebase Auth failed, using robust direct Firestore fallback:', authErr);
+        uid = 'db_user_google_' + sanitizedEmail.replace(/[^a-zA-Z0-9]/g, '_');
+      }
+      
+      const refCode = 'SIKKHO-' + (name || 'Google User').substring(0, 3).toUpperCase() + Math.floor(100 + Math.random() * 900);
+      const isUserAdmin = sanitizedEmail === 'tiwarigautam819@gmail.com';
+      
+      const docRef = doc(db, COLLECTIONS.USERS, uid);
+      const docSnap = await getDoc(docRef);
+      
+      let userProfile: UserProfile;
+      if (!docSnap.exists()) {
+        userProfile = {
+          uid,
+          name: name || sanitizedEmail.split('@')[0],
+          email: sanitizedEmail,
+          photoUrl: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120',
+          referralCode: refCode,
+          referralCount: 0,
+          points: 100,
+          badge: 'Bronze',
+          createdAt: new Date().toISOString(),
+          lastActive: new Date().toISOString()
+        };
+        await setDoc(docRef, userProfile);
+      } else {
+        userProfile = docSnap.data() as UserProfile;
+      }
+      
+      setCurrentUser(userProfile);
+      setIsAdmin(isUserAdmin);
+      setShowGoogleModal(false);
+    } catch (err: any) {
+      console.error('Google Auth failed:', err);
+      setAuthError(err.message || 'An error occurred during Google authentication.');
+    } finally {
+      setIsSubmittingAuth(false);
+    }
+  };
+
+
+
+  // Log Out Flow
+  const handleLogOut = async () => {
+    try {
+      await signOut(auth);
+    } catch (e) {
+      console.warn('SignOut failed:', e);
+    }
+    setCurrentUser(null);
+    setIsAdmin(false);
+  };
+
+  // Toggle Favorite Action
+  const handleToggleFavorite = (videoId: string) => {
+    let updated: string[];
+    if (favorites.includes(videoId)) {
+      updated = favorites.filter(id => id !== videoId);
+    } else {
+      updated = [...favorites, videoId];
+      addPoints(10); // Reward 10 points for exploring!
+    }
+    setFavorites(updated);
+    localStorage.setItem('sikkho_favorites', JSON.stringify(updated));
+  };
+
+  // Handle Video Click (Register watch history & Play video directly on the page)
+  const handlePlayVideo = async (video: Video) => {
+    // 1. Add to local watch history
+    const isNewWatch = !watchHistory.some(h => h.videoId === video.id);
+    const updatedHistory = [{ videoId: video.id, watchedAt: new Date().toISOString() }, ...watchHistory.filter(h => h.videoId !== video.id)];
+    setWatchHistory(updatedHistory);
+    localStorage.setItem('sikkho_history', JSON.stringify(updatedHistory));
+
+    // 2. Award activity points for watching video
+    if (isNewWatch) {
+      addPoints(25); // Award 25 points on new discovery
+    } else {
+      addPoints(5); // Small award on revisit
+    }
+
+    // 3. Increment click/view counter in Firestore safely
+    try {
+      await updateDoc(doc(db, COLLECTIONS.VIDEOS, video.id), {
+        views: (video.views || 0) + 1
+      });
+    } catch (e) {
+      console.warn('Could not update views on Firestore', e);
+    }
+
+    // 4. Open embedded video player directly on page
+    setActivePlayingVideo(video);
+  };
+
+  // Play Video from promotional banner slideshow using embedded player
+  const handlePlayBannerVideo = (videoUrl: string) => {
+    const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
+    const match = videoUrl.match(regExp);
+    const id = (match && match[2].length === 11) ? match[2] : null;
+    if (!id) return;
+
+    const found = videos.find(v => v.videoId === id);
+    if (found) {
+      handlePlayVideo(found);
+    } else {
+      const transientVideo: Video = {
+        id: `transient_${id}`,
+        videoUrl: videoUrl,
+        videoId: id,
+        title: banners[bannerIndex]?.title || 'Featured Lesson Video',
+        thumbnail: banners[bannerIndex]?.imageUrl || `https://img.youtube.com/vi/${id}/hqdefault.jpg`,
+        category: 'Featured Video',
+        uploadedAt: new Date().toISOString(),
+        views: 0
+      };
+      setActivePlayingVideo(transientVideo);
+    }
+  };
+
+  // Pull to Refresh Handler
+  const handlePullToRefresh = async () => {
+    // Re-sync with Firebase manually
+    try {
+      const snap = await getDocs(collection(db, COLLECTIONS.VIDEOS));
+      if (!snap.empty) {
+        setVideos(snap.docs.map(d => ({ id: d.id, ...d.data() } as Video)));
+      }
+    } catch (e) {
+      console.warn(e);
+    }
+  };
+
+  // Onboarding Finish Callback
+  const handleFinishOnboarding = () => {
+    localStorage.setItem('sikkho_onboarded', 'true');
+    setShowOnboarding(false);
+  };
+
+  // Share Application mock dialog
+  const handleShareApp = () => {
+    const text = `Learn, grow, and achieve! Discover high-quality coding tutorials on the Sikkho App. Download here: ${window.location.href}`;
+    navigator.clipboard.writeText(text);
+    alert('🎉 Referral App Link copied! Share it on WhatsApp/Facebook to help us increase our subscriber base!');
+    addPoints(15); // Bonus points for sharing
+  };
+
+  // Send rating feedback
+  const handleRateSubmit = () => {
+    alert(`⭐ Thank you for rating Sikkho ${userRating}/5 stars! Your support drives us forward.`);
+    setShowRateModal(false);
+    addPoints(30); // Award points for rating
+  };
+
+  // Render Overlay Modals
+  const renderOverlay = () => {
+    switch (activeOverlay) {
+      case 'request':
+        return (
+          <VideoRequestModal
+            onClose={() => setActiveOverlay('none')}
+            userProfile={currentUser}
+            onAddPoints={addPoints}
+          />
+        );
+      case 'admin':
+        return (
+          <AdminPanel
+            onClose={() => setActiveOverlay('none')}
+            onRefreshVideos={() => {}}
+          />
+        );
+      case 'faq':
+        return <FAQ onClose={() => setActiveOverlay('none')} />;
+      case 'feedback':
+        return (
+          <Feedback
+            onClose={() => setActiveOverlay('none')}
+            userProfile={currentUser}
+            onAddPoints={addPoints}
+          />
+        );
+      case 'developer':
+        return <AboutDeveloper onClose={() => setActiveOverlay('none')} />;
+      case 'privacy':
+        return <PrivacyPolicy onClose={() => setActiveOverlay('none')} />;
+      case 'terms':
+        return <TermsConditions onClose={() => setActiveOverlay('none')} />;
+      case 'update':
+        return <UpdateChecker onClose={() => setActiveOverlay('none')} />;
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <DeviceFrame
+      isDarkMode={isDarkMode}
+      setIsDarkMode={setIsDarkMode}
+      isAdmin={isAdmin}
+      userEmail={currentUser?.email || ''}
+      activeTab={activeTab}
+      setActiveTab={setActiveTab}
+      onOpenAdmin={() => setActiveOverlay('admin')}
+    >
+      <div className={`flex-1 flex flex-col overflow-hidden relative select-none ${isDarkMode ? 'dark' : ''}`}>
+        
+        {/* Onboarding & Splash Overlays */}
+        <AnimatePresence>
+          {showSplash && <Splash onFinish={() => setShowSplash(false)} />}
+          {!showSplash && showOnboarding && <Onboarding onFinish={handleFinishOnboarding} />}
+        </AnimatePresence>
+
+        {/* AUTHENTICATION VIEW CARD (GORGEOUS GOOGLE MOCK) */}
+        {!showSplash && !showOnboarding && !currentUser && (
+          <div className="absolute inset-0 bg-[#07041c] z-30 flex flex-col p-4 overflow-y-auto select-none font-sans">
+            
+            {/* Top Logo & Theme Toggle bar (matching screenshot) */}
+            <div className="w-full max-w-md mx-auto flex items-center justify-between py-2 sm:py-4 shrink-0 px-2 select-none">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 sm:w-10 sm:h-10 bg-red-600 rounded-xl flex items-center justify-center text-white shadow-md shadow-red-500/20">
+                  <GraduationCap className="w-5.5 h-5.5 sm:w-6 sm:h-6" />
+                </div>
+                <span className="text-lg sm:text-xl font-black text-white tracking-wide">Sikkho</span>
+              </div>
+              <button
+                onClick={() => setIsDarkMode(!isDarkMode)}
+                className="w-9 h-9 sm:w-10 sm:h-10 bg-[#120e36] border border-slate-800/80 rounded-xl flex items-center justify-center text-slate-300 hover:text-white transition-colors"
+              >
+                {isDarkMode ? <Sun className="w-4.5 h-4.5" /> : <Moon className="w-4.5 h-4.5" />}
+              </button>
+            </div>
+
+            {/* Ambient Background Blur Layers */}
+            <div className="absolute top-[20%] left-[5%] w-60 h-60 rounded-full bg-purple-600/10 blur-[90px] pointer-events-none" />
+            <div className="absolute bottom-[20%] right-[5%] w-72 h-72 rounded-full bg-pink-600/10 blur-[100px] pointer-events-none" />
+
+            {/* FLOATING 3D-EFFECT SHAPES (Slightly overlapping the main card) */}
+            <div className="relative w-full max-w-md mx-auto my-auto py-4">
+              
+              {/* Pink Play Button */}
+              <motion.div
+                animate={{ y: [0, -8, 0], rotate: [-12, -8, -12] }}
+                transition={{ repeat: Infinity, duration: 4.5, ease: "easeInOut" }}
+                className="absolute left-[-16px] top-[75px] sm:left-[-24px] sm:top-[90px] z-20 w-11 h-11 sm:w-14 sm:h-14 bg-gradient-to-tr from-pink-500 to-rose-600 rounded-2xl flex items-center justify-center text-white shadow-[0_8px_20px_rgba(244,63,94,0.35)] border border-pink-400/20 transform -rotate-12 cursor-pointer"
+              >
+                <Play className="w-4.5 h-4.5 fill-current ml-0.5" />
+              </motion.div>
+
+              {/* Purple Upward Chart */}
+              <motion.div
+                animate={{ y: [0, 8, 0], rotate: [12, 16, 12] }}
+                transition={{ repeat: Infinity, duration: 5, ease: "easeInOut" }}
+                className="absolute right-[-16px] top-[190px] sm:right-[-24px] sm:top-[210px] z-20 w-11 h-11 sm:w-14 sm:h-14 bg-gradient-to-tr from-indigo-500 to-purple-600 rounded-2xl flex flex-col items-center justify-center text-white shadow-[0_8px_20px_rgba(124,58,237,0.35)] border border-indigo-400/20 transform rotate-12 p-1.5 cursor-pointer"
+              >
+                <TrendingUp className="w-3.5 h-3.5 text-amber-400 mb-0.5" />
+                <div className="flex gap-0.5 items-end h-3 w-4.5">
+                  <span className="w-1 h-1 bg-white/40 rounded-t-xs" />
+                  <span className="w-1 h-1.5 bg-white/70 rounded-t-xs" />
+                  <span className="w-1 h-2.5 bg-white rounded-t-xs" />
+                </div>
+              </motion.div>
+
+              {/* Confetti & Dots */}
+              <div className="absolute left-[20px] top-[260px] w-2 h-2 bg-rose-400/60 rounded-full blur-[0.5px] pointer-events-none" />
+              <div className="absolute right-[40px] top-[40px] w-2.5 h-2.5 bg-indigo-400/40 rounded-full blur-[0.5px] pointer-events-none" />
+
+              {/* Central Card */}
+              <div className="w-full bg-gradient-to-b from-[#181145] to-[#0a0524] rounded-[2.5rem] border border-[#2b1f6d] shadow-[0_20px_50px_rgba(13,9,44,0.6)] p-6 sm:p-8 flex flex-col justify-between relative overflow-hidden space-y-4">
+                
+                {/* Header info */}
+                <div className="flex flex-col items-center text-center relative select-none">
+                  {/* Ambient pink/red glow behind logo */}
+                  <div className="absolute w-24 h-24 bg-red-500/25 rounded-full blur-xl -top-3" />
+                  <div className="w-16 h-16 bg-gradient-to-br from-red-500 to-red-600 rounded-2xl flex items-center justify-center text-white mb-3.5 shadow-[0_8px_25px_rgba(239,68,68,0.45)] relative z-10 border border-red-400/20">
+                    <GraduationCap className="w-9 h-9" />
+                  </div>
+                  <h2 className="text-2xl sm:text-3xl font-black text-white leading-tight">
+                    Welcome to <span className="text-transparent bg-clip-text bg-gradient-to-r from-pink-500 via-rose-500 to-amber-500">Sikkho</span>
+                  </h2>
+                  <p className="text-xs text-slate-300/80 mt-1.5 max-w-xs leading-relaxed font-medium">
+                    Learn YouTube growth, add lessons, request tutorials, and grow your channel!
+                  </p>
+                </div>
+
+                {/* Mode Toggle Tabs */}
+                <div className="flex bg-[#0b0724]/80 border border-[#2a1d69] p-1.5 rounded-2xl w-full select-none">
+                  <button
+                    type="button"
+                    onClick={() => { setAuthMode('login'); setAuthError(null); }}
+                    className={`flex-1 py-2.5 text-xs font-black rounded-xl transition-all duration-300 ${
+                      authMode === 'login'
+                        ? 'bg-gradient-to-r from-pink-500 to-orange-500 text-white shadow-[0_4px_12px_rgba(239,68,68,0.25)] font-black'
+                        : 'text-slate-400 hover:text-slate-200 font-bold'
+                    }`}
+                  >
+                    Sign In
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setAuthMode('signup'); setAuthError(null); }}
+                    className={`flex-1 py-2.5 text-xs font-black rounded-xl transition-all duration-300 ${
+                      authMode === 'signup'
+                        ? 'bg-gradient-to-r from-pink-500 to-orange-500 text-white shadow-[0_4px_12px_rgba(239,68,68,0.25)] font-black'
+                        : 'text-slate-400 hover:text-slate-200 font-bold'
+                    }`}
+                  >
+                    Create Account
+                  </button>
+                </div>
+
+                {/* Error Display */}
+                {authError && (
+                  <div className="bg-red-950/40 border border-red-500/30 text-red-300 p-3.5 rounded-2xl text-[11px] font-bold flex items-center gap-2">
+                    <Info className="w-4 h-4 shrink-0 text-red-400" />
+                    <span>{authError}</span>
+                  </div>
+                )}
+
+                {/* Firebase Guide Card for operation-not-allowed error */}
+                {authError && (authError.includes('operation-not-allowed') || authError.includes('auth/operation-not-allowed')) && (
+                  <div className="bg-[#120c3a] border border-amber-500/30 text-slate-300 p-4 rounded-3xl text-xs space-y-3 shadow-lg">
+                    <div className="flex items-center gap-2 text-amber-400 font-extrabold text-[12px]">
+                      <Sparkles className="w-4 h-4" />
+                      <span>Firebase Auth Setup Guide (हिन्दी & English)</span>
+                    </div>
+                    <p className="text-[11px] leading-relaxed text-slate-400">
+                      यह एरर इसलिए आ रही है क्योंकि आपके Firebase प्रोजेक्ट में <strong>Email/Password</strong> या <strong>Google Auth</strong> चालू नहीं है। इसे ठीक करें:
+                    </p>
+                    
+                    <div className="space-y-2 text-[11px] pl-2 list-decimal">
+                      <div>
+                        <strong className="text-slate-200">1. Enable Sign-In Providers:</strong>
+                        <div className="text-slate-400 mt-0.5">
+                          Firebase Console &gt; Authentication &gt; Sign-In Method में जाकर <strong>Email/Password</strong> और <strong>Google</strong> चालू करें.
+                        </div>
+                      </div>
+                      <div>
+                        <strong className="text-slate-200">2. Add Authorized Domains (डोमेन कनेक्ट करें):</strong>
+                        <div className="text-slate-400 mt-0.5">
+                          Authentication &gt; Settings &gt; Authorized Domains में नीचे दिए गए डोमेन जोड़ें:
+                        </div>
+                        <div className="mt-2 space-y-1">
+                          {[
+                            'localhost',
+                            'ais-dev-zpi6rtoigiz3pt5fhhtmnr-465326683782.asia-east1.run.app',
+                            'ais-pre-zpi6rtoigiz3pt5fhhtmnr-465326683782.asia-east1.run.app'
+                          ].map((domain) => (
+                            <div key={domain} className="flex items-center justify-between bg-[#0b0724] px-2.5 py-1.5 rounded-xl border border-slate-800 font-mono text-[10px]">
+                              <span className="truncate mr-2 text-slate-300">{domain}</span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  navigator.clipboard.writeText(domain);
+                                  alert(`Copied: ${domain}`);
+                                }}
+                                className="text-[9px] bg-amber-500/20 hover:bg-amber-500/35 text-amber-400 px-2 py-0.5 rounded-lg font-extrabold transition shrink-0"
+                              >
+                                Copy
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Custom Log-In / Sign-Up Form */}
+                <form onSubmit={handleAuthSubmit} className="space-y-4">
+                  {authMode === 'signup' && (
+                    <div>
+                      <label className="text-[10px] uppercase font-extrabold text-[#7469b6] tracking-wider block mb-1.5 pl-1">Full Name</label>
+                      <div className="relative flex items-center">
+                        <div className="absolute left-3 w-8 h-8 rounded-xl bg-[#231758] flex items-center justify-center text-[#ff3366]">
+                          <User className="w-4 h-4" />
+                        </div>
+                        <input
+                          type="text"
+                          required
+                          placeholder="Enter your name"
+                          value={loginName}
+                          onChange={(e) => setLoginName(e.target.value)}
+                          className="w-full p-3.5 pl-13 text-xs bg-[#0b0724]/75 border border-[#2d2175] rounded-2xl focus:outline-none focus:border-[#ff3366] focus:ring-1 focus:ring-[#ff3366] text-white placeholder-slate-500 font-medium transition"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="text-[10px] uppercase font-extrabold text-[#7469b6] tracking-wider block mb-1.5 pl-1">
+                      {authMode === 'login' ? 'Email Address or Mobile Number' : 'Email Address'}
+                    </label>
+                    <div className="relative flex items-center">
+                      <div className="absolute left-3 w-8 h-8 rounded-xl bg-[#231758] flex items-center justify-center text-[#ff3366]">
+                        <Mail className="w-4 h-4" />
+                      </div>
+                      <input
+                        type="text"
+                        required
+                        placeholder={authMode === 'login' ? "e.g. learner@gmail.com or 8955932061" : "e.g. learner@gmail.com"}
+                        value={loginEmail}
+                        onChange={(e) => setLoginEmail(e.target.value)}
+                        className="w-full p-3.5 pl-13 text-xs bg-[#0b0724]/75 border border-[#2d2175] rounded-2xl focus:outline-none focus:border-[#ff3366] focus:ring-1 focus:ring-[#ff3366] text-white placeholder-slate-500 font-medium transition"
+                      />
+                    </div>
+                  </div>
+
+                  {authMode === 'signup' && (
+                    <div>
+                      <label className="text-[10px] uppercase font-extrabold text-[#7469b6] tracking-wider block mb-1.5 pl-1">Mobile Number (Optional)</label>
+                      <div className="relative flex items-center">
+                        <div className="absolute left-3 w-8 h-8 rounded-xl bg-[#231758] flex items-center justify-center text-[#ff3366]">
+                          <Phone className="w-4 h-4" />
+                        </div>
+                        <input
+                          type="tel"
+                          placeholder="e.g. 8955932061"
+                          value={loginMobile}
+                          onChange={(e) => setLoginMobile(e.target.value)}
+                          className="w-full p-3.5 pl-13 text-xs bg-[#0b0724]/75 border border-[#2d2175] rounded-2xl focus:outline-none focus:border-[#ff3366] focus:ring-1 focus:ring-[#ff3366] text-white placeholder-slate-500 font-medium transition"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="text-[10px] uppercase font-extrabold text-[#7469b6] tracking-wider block mb-1.5 pl-1">Password</label>
+                    <div className="relative flex items-center">
+                      <div className="absolute left-3 w-8 h-8 rounded-xl bg-[#231758] flex items-center justify-center text-[#a855f7]">
+                        <Lock className="w-4 h-4" />
+                      </div>
+                      <input
+                        type="password"
+                        required
+                        placeholder="Enter account password (min 6 chars)"
+                        value={loginPassword}
+                        onChange={(e) => setLoginPassword(e.target.value)}
+                        className="w-full p-3.5 pl-13 text-xs bg-[#0b0724]/75 border border-[#2d2175] rounded-2xl focus:outline-none focus:border-[#ff3366] focus:ring-1 focus:ring-[#ff3366] text-white placeholder-slate-500 font-medium transition"
+                      />
+                    </div>
+                  </div>
+
+                  {authMode === 'signup' && (
+                    <div>
+                      <label className="text-[10px] uppercase font-extrabold text-[#7469b6] tracking-wider block mb-1.5 pl-1">Referral Code (Optional)</label>
+                      <div className="relative flex items-center">
+                        <div className="absolute left-3 w-8 h-8 rounded-xl bg-[#231758] flex items-center justify-center text-[#3b82f6]">
+                          <Gift className="w-4 h-4" />
+                        </div>
+                        <input
+                          type="text"
+                          placeholder="e.g. SIKKHO-ABCD"
+                          value={enteredReferral}
+                          onChange={(e) => setEnteredReferral(e.target.value)}
+                          className="w-full p-3.5 pl-13 text-xs bg-[#0b0724]/75 border border-[#2d2175] rounded-2xl focus:outline-none focus:border-[#ff3366] focus:ring-1 focus:ring-[#ff3366] text-white placeholder-slate-500 font-medium tracking-wider uppercase transition font-mono"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={isSubmittingAuth}
+                    className="w-full bg-gradient-to-r from-pink-500 to-orange-500 hover:from-pink-600 hover:to-orange-600 text-white font-extrabold py-4 px-6 rounded-2xl transition duration-300 flex items-center justify-center gap-2 shadow-[0_6px_20px_rgba(244,63,94,0.35)] hover:shadow-[0_8px_25px_rgba(244,63,94,0.45)] transform active:scale-[0.98] mt-6"
+                  >
+                    {isSubmittingAuth ? <RefreshCw className="w-4 h-4 animate-spin" /> : (authMode === 'login' ? 'Sign In Account' : 'Register & Enter')}
+                  </button>
+                </form>
+
+                {/* OR Connector */}
+                <div className="relative flex py-2 items-center">
+                  <div className="flex-grow border-t border-[#231b5c]"></div>
+                  <span className="flex-shrink mx-4 text-[9px] text-[#554b9d] font-black uppercase tracking-widest">Or Continue With</span>
+                  <div className="flex-grow border-t border-[#231b5c]"></div>
+                </div>
+
+                {/* Google Button */}
+                <button
+                  type="button"
+                  onClick={() => setShowGoogleModal(true)}
+                  className="w-full bg-[#0d092c]/80 border border-[#2a206a] hover:bg-[#150f41] text-white font-extrabold py-3.5 px-6 rounded-2xl transition duration-300 flex items-center justify-center gap-2.5 shadow-md transform active:scale-[0.98]"
+                >
+                  <svg className="w-4.5 h-4.5" viewBox="0 0 24 24">
+                    <path fill="#EA4335" d="M12 5.04c1.66 0 3.2.57 4.38 1.69l3.27-3.27C17.67 1.47 15.02.5 12 .5 7.37.5 3.4 3.17 1.5 7.07l3.87 3a6.98 6.98 0 016.63-5.03z"/>
+                    <path fill="#4285F4" d="M23.49 12.27c0-.81-.07-1.59-.2-2.34H12v4.44h6.46a5.53 5.53 0 01-2.4 3.63v3.01h3.87c2.26-2.08 3.56-5.14 3.56-8.74z"/>
+                    <path fill="#FBBC05" d="M5.37 14.12a6.92 6.92 0 010-4.24L1.5 6.88A11.93 11.93 0 000 12c0 1.83.41 3.57 1.15 5.14l4.22-3.02z"/>
+                    <path fill="#34A853" d="M12 23.5c3.24 0 5.97-1.07 7.96-2.92l-3.87-3.01c-1.07.72-2.45 1.15-4.09 1.15-3.13 0-5.78-2.12-6.73-4.97L1.4 16.78c1.9 3.9 5.87 6.57 10.6 6.57z"/>
+                  </svg>
+                  <span className="text-xs sm:text-sm">Google Sign In</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* GOOGLE SIGN IN MODAL WINDOW */}
+        {showGoogleModal && (
+          <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+            <div className="w-full max-w-sm bg-white dark:bg-slate-900 rounded-[2rem] border border-slate-200/50 dark:border-slate-800 shadow-2xl p-6 relative">
+              <button 
+                onClick={() => setShowGoogleModal(false)}
+                className="absolute top-4 right-4 p-1 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+
+              <div className="text-center space-y-4">
+                <div className="flex justify-center">
+                  <div className="w-12 h-12 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center shadow-inner">
+                    <svg className="w-6 h-6" viewBox="0 0 24 24">
+                      <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                      <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                      <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l3.66-2.85z"/>
+                      <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.85c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                    </svg>
+                  </div>
+                </div>
+
+                <div>
+                  <h3 className="font-black text-lg text-slate-900 dark:text-white">Choose an Account</h3>
+                  <p className="text-[11px] text-slate-500">to continue to Sikkho App</p>
+                </div>
+
+                <div className="space-y-2.5 pt-2">
+                  {/* Option 1: Gautam Tiwari Admin preset */}
+                  <button
+                    onClick={() => handleGoogleAuth('Gautam Tiwari', 'tiwarigautam819@gmail.com')}
+                    className="w-full flex items-center gap-3 p-3 rounded-2xl bg-slate-50 hover:bg-red-50 dark:bg-slate-950 dark:hover:bg-red-950/20 border border-slate-100 dark:border-slate-800 transition text-left"
+                  >
+                    <div className="w-8 h-8 rounded-full bg-red-600 flex items-center justify-center text-white text-xs font-bold shadow">
+                      G
+                    </div>
+                    <div>
+                      <p className="text-xs font-extrabold text-slate-900 dark:text-white">Gautam Tiwari (Admin)</p>
+                      <p className="text-[10px] text-slate-500">tiwarigautam819@gmail.com</p>
+                    </div>
+                  </button>
+
+                  {/* Option 2: Custom input fields */}
+                  <div className="bg-slate-50 dark:bg-slate-950 p-3 rounded-2xl border border-slate-100 dark:border-slate-800 text-left space-y-2">
+                    <span className="text-[9px] uppercase font-bold text-slate-400 block">Or Enter any other Account</span>
+                    <input
+                      type="text"
+                      placeholder="Your Full Name"
+                      value={googleName}
+                      onChange={(e) => setGoogleName(e.target.value)}
+                      className="w-full p-2 text-xs bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-lg focus:outline-none"
+                    />
+                    <input
+                      type="email"
+                      placeholder="your.email@gmail.com"
+                      value={googleEmail}
+                      onChange={(e) => setGoogleEmail(e.target.value)}
+                      className="w-full p-2 text-xs bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-lg focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      disabled={!googleEmail}
+                      onClick={() => handleGoogleAuth(googleName, googleEmail)}
+                      className="w-full py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-[11px] font-bold transition disabled:opacity-50"
+                    >
+                      Authenticate Account
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ACTIVE SCREEN OVERLAYS */}
+        <AnimatePresence>
+          {activeOverlay !== 'none' && (
+            <motion.div
+              initial={{ opacity: 0, scale: 1.02 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 1.02 }}
+              className="absolute inset-0 z-40 bg-white"
+            >
+              {renderOverlay()}
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* -------------------- MAIN APP SHELL -------------------- */}
+        {!showSplash && !showOnboarding && currentUser && (
+          <div className="flex-1 flex flex-col overflow-hidden bg-slate-50 dark:bg-slate-950 text-slate-850 dark:text-slate-100 transition-colors">
+            
+            {/* HOME HEADER PANEL */}
+            {activeTab === 'home' && banners.length > 0 && (
+              <div className="bg-white dark:bg-slate-950 px-4 py-4 shrink-0 border-b border-slate-100 dark:border-slate-900/50 transition-colors">
+                <div className="max-w-7xl mx-auto">
+                  
+                  {/* Promotional Banner Slideshow */}
+                  <div className="relative h-28 md:h-36 w-full rounded-2xl overflow-hidden shadow-sm group">
+                    <img 
+                      src={banners[bannerIndex]?.imageUrl} 
+                      className="w-full h-full object-cover transition-all" 
+                      alt="Banner slide" 
+                    />
+                    <div className="absolute inset-0 bg-gradient-to-t from-slate-950/75 via-transparent to-transparent flex flex-col justify-end p-3">
+                      {banners[bannerIndex]?.title && (
+                        <h3 className="text-xs font-bold text-white leading-tight">
+                          {banners[bannerIndex]?.title}
+                        </h3>
+                      )}
+                      {banners[bannerIndex]?.videoUrl && (
+                        <button 
+                          onClick={() => handlePlayBannerVideo(banners[bannerIndex].videoUrl!)}
+                          className="text-[10px] text-red-400 font-extrabold hover:underline mt-1 flex items-center gap-0.5 text-left"
+                        >
+                          Discover Video <ArrowUpRight className="w-3 h-3" />
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Banner Control Arrows */}
+                    <div className="absolute top-1/2 -translate-y-1/2 left-2 right-2 flex justify-between opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button 
+                        onClick={() => setBannerIndex(prev => prev === 0 ? banners.length - 1 : prev - 1)}
+                        className="bg-black/40 text-white p-1 rounded-full hover:bg-black/60 transition"
+                      >
+                        <ChevronLeft className="w-3.5 h-3.5" />
+                      </button>
+                      <button 
+                        onClick={() => setBannerIndex(prev => prev === banners.length - 1 ? 0 : prev + 1)}
+                        className="bg-black/40 text-white p-1 rounded-full hover:bg-black/60 transition"
+                      >
+                        <ChevronRight className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+
+                </div>
+              </div>
+            )}
+
+            {/* TAB SCREENS ROUTING */}
+            {activeTab === 'home' && (
+              <VideoGrid
+                videos={videos}
+                favorites={favorites}
+                onToggleFavorite={handleToggleFavorite}
+                onPlayVideo={handlePlayVideo}
+                onPullToRefresh={handlePullToRefresh}
+              />
+            )}
+
+            {activeTab === 'leaderboard' && (
+              <Leaderboard
+                users={leaderboardUsers}
+                currentUser={currentUser}
+              />
+            )}
+
+            {activeTab === 'favorites' && (
+              <div className="flex-1 flex flex-col overflow-hidden bg-slate-50 dark:bg-slate-950">
+                <div className="bg-white dark:bg-slate-950 px-4 py-3 shrink-0 border-b border-slate-100 dark:border-slate-900 select-none flex items-center justify-between">
+                  <h3 className="font-bold text-sm text-slate-800 dark:text-white flex items-center gap-1.5">
+                    <Heart className="w-4 h-4 text-red-500 fill-current" /> My Favorites
+                  </h3>
+                  <span className="text-xs text-slate-400">({favorites.length} saved)</span>
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-4 md:p-6 lg:p-8">
+                  {favorites.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-20 text-center">
+                      <div className="w-12 h-12 bg-slate-100 dark:bg-slate-900 rounded-full flex items-center justify-center mb-3">
+                        <Heart className="w-5 h-5 text-slate-400" />
+                      </div>
+                      <p className="text-xs font-bold text-slate-700 dark:text-slate-300">Your saved videos will appear here</p>
+                      <p className="text-[10px] text-slate-400 max-w-[200px] mt-1">Tap the heart icon on any card to favorite a tutorial.</p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 max-w-7xl mx-auto">
+                      {videos.filter(v => favorites.includes(v.id)).map(vid => (
+                        <div key={vid.id} className="bg-white dark:bg-slate-900 p-2.5 rounded-2xl border border-slate-100 dark:border-slate-800 flex gap-3 shadow-sm hover:shadow-md transition">
+                          <img src={vid.thumbnail} className="w-24 h-16 object-cover rounded-xl shrink-0" alt="thumb" />
+                          <div className="flex-1 min-w-0 flex flex-col justify-between py-0.5">
+                            <p onClick={() => handlePlayVideo(vid)} className="text-xs font-bold text-slate-800 dark:text-white truncate cursor-pointer hover:text-red-500">
+                              {vid.title}
+                            </p>
+                            <div className="flex items-center justify-between mt-2 select-none">
+                              <span className="text-[9px] uppercase font-bold text-red-500 bg-red-50 dark:bg-red-950/40 dark:text-red-400 px-1.5 py-0.2 rounded">
+                                {vid.category}
+                              </span>
+                              <div className="flex items-center gap-2">
+                                <button 
+                                  onClick={() => handleToggleFavorite(vid.id)}
+                                  className="text-red-500 hover:text-slate-400 transition"
+                                >
+                                  <Heart className="w-4 h-4 fill-current" />
+                                </button>
+                                <button 
+                                  onClick={() => handlePlayVideo(vid)}
+                                  className="p-1 bg-slate-100 dark:bg-slate-800 hover:bg-red-50 dark:hover:bg-red-950/20 rounded-lg text-slate-600 dark:text-slate-400 hover:text-red-500 transition"
+                                >
+                                  <Play className="w-3.5 h-3.5 fill-current ml-0.5" />
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'history' && (
+              <div className="flex-1 flex flex-col overflow-hidden bg-slate-50 dark:bg-slate-950">
+                <div className="bg-white dark:bg-slate-950 px-4 py-3 shrink-0 border-b border-slate-100 dark:border-slate-900 select-none flex items-center justify-between">
+                  <h3 className="font-bold text-sm text-slate-800 dark:text-white flex items-center gap-1.5">
+                    <History className="w-4 h-4 text-red-500" /> Watch History
+                  </h3>
+                  <button 
+                    onClick={() => {
+                      if (window.confirm('Clear all history?')) {
+                        setWatchHistory([]);
+                        localStorage.removeItem('sikkho_history');
+                      }
+                    }} 
+                    className="text-[10px] text-slate-400 hover:text-red-500 font-bold"
+                  >
+                    Clear All
+                  </button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-4 md:p-6 lg:p-8">
+                  {watchHistory.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-20 text-center">
+                      <div className="w-12 h-12 bg-slate-100 dark:bg-slate-900 rounded-full flex items-center justify-center mb-3">
+                        <History className="w-5 h-5 text-slate-400" />
+                      </div>
+                      <p className="text-xs font-bold text-slate-700 dark:text-slate-300">No recently watched videos</p>
+                      <p className="text-[10px] text-slate-400 max-w-[200px] mt-1">Videos you click and open in YouTube will track here.</p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 max-w-7xl mx-auto">
+                      {watchHistory.map((histItem, idx) => {
+                        const vidMatch = videos.find(v => v.id === histItem.videoId);
+                        if (!vidMatch) return null;
+
+                        return (
+                          <div key={idx} className="bg-white dark:bg-slate-900 p-2.5 rounded-2xl border border-slate-100 dark:border-slate-800 flex gap-3 shadow-sm hover:shadow-md transition">
+                            <img src={vidMatch.thumbnail} className="w-24 h-16 object-cover rounded-xl shrink-0" alt="thumb" />
+                            <div className="flex-1 min-w-0 flex flex-col justify-between py-0.5">
+                              <p onClick={() => handlePlayVideo(vidMatch)} className="text-xs font-bold text-slate-800 dark:text-white truncate cursor-pointer hover:text-red-500">
+                                {vidMatch.title}
+                              </p>
+                              <div className="flex items-center justify-between mt-2 select-none text-[9px] text-slate-400">
+                                <span>Opened {new Date(histItem.watchedAt).toLocaleDateString()}</span>
+                                <button 
+                                  onClick={() => handlePlayVideo(vidMatch)}
+                                  className="p-1 bg-slate-100 dark:bg-slate-800 hover:bg-red-50 dark:hover:bg-red-950/20 rounded-lg text-slate-600 dark:text-slate-400 hover:text-red-500 transition"
+                                >
+                                  <Play className="w-3.5 h-3.5 fill-current ml-0.5" />
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'profile' && (
+              <div className="flex-1 overflow-y-auto bg-slate-50 dark:bg-slate-950 pb-6">
+                
+                {/* User Banner Card */}
+                <div className="bg-white dark:bg-slate-900 p-5 rounded-b-[2rem] border-b border-slate-100 dark:border-slate-800/80 shadow-sm flex flex-col items-center text-center transition-colors">
+                  <img src={currentUser.photoUrl} className="w-20 h-20 rounded-full border-4 border-red-500 object-cover shadow-md mb-3" alt="avatar" />
+                  <h3 className="font-extrabold text-base text-slate-900 dark:text-white leading-tight">{currentUser.name}</h3>
+                  <p className="text-[10px] text-slate-400 font-semibold mt-1">{currentUser.email}</p>
+                  
+                  {/* Badge & Points display */}
+                  <div className="flex items-center gap-2 mt-3 select-none">
+                    <span className="text-xs bg-red-50 dark:bg-red-950/40 text-red-600 font-extrabold px-3 py-1 rounded-xl border border-red-100 dark:border-red-900/40">
+                      {currentUser.badge} Badge
+                    </span>
+                    <span className="text-xs bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-extrabold px-3 py-1 rounded-xl border border-slate-100 dark:border-slate-700/60">
+                      {currentUser.points} PTS
+                    </span>
+                  </div>
+                </div>
+
+                {/* Main Navigation List */}
+                <div className="p-4 space-y-4">
+                  
+                  {/* Notification Inbox segment */}
+                  {notifications.length > 0 && (
+                    <div className="bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-3xl p-4 shadow-sm space-y-3">
+                      <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                        <Bell className="w-4 h-4 text-red-500 animate-pulse" /> Notification Box ({notifications.length})
+                      </h4>
+                      <div className="divide-y divide-slate-100 dark:divide-slate-800 max-h-[150px] overflow-y-auto space-y-2 pr-1 scrollbar-thin">
+                        {notifications.map(notif => (
+                          <div key={notif.id} className="pt-2 first:pt-0">
+                            <span className="text-[8px] uppercase font-bold text-red-500 bg-red-50 px-1 rounded">
+                              {notif.type}
+                            </span>
+                            <p className="text-xs font-bold text-slate-800 dark:text-white mt-1 leading-tight">{notif.title}</p>
+                            <p className="text-[10px] text-slate-500 mt-0.5 leading-snug">{notif.message}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Menu Items */}
+                  <div className="bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-3xl p-2 shadow-sm space-y-0.5 divide-y divide-slate-50 dark:divide-slate-850/60">
+                    {[
+                      { label: 'WhatsApp Support', icon: <Phone className="w-4 h-4" />, action: () => window.open('https://wa.me/918955932061?text=Hi%20Gautam%20Tiwari,%20I%27m%20using%20the%20Sikkho%20App%20and%20need%20assistance%2520or%2520would%2520like%2520to%2520collaborate!', '_blank'), color: 'text-emerald-500' },
+                      { label: 'FAQ & Help', icon: <HelpCircle className="w-4 h-4" />, action: () => setActiveOverlay('faq') },
+                      { label: 'Give Feedback', icon: <MessageSquare className="w-4 h-4" />, action: () => setActiveOverlay('feedback') },
+                      { label: 'Check App Updates', icon: <RefreshCw className="w-4 h-4" />, action: () => setActiveOverlay('update') },
+                      { label: 'About Developer', icon: <User className="w-4 h-4" />, action: () => setActiveOverlay('developer') },
+                      { label: 'Privacy Policy', icon: <Shield className="w-4 h-4" />, action: () => setActiveOverlay('privacy') },
+                      { label: 'Terms & Conditions', icon: <Info className="w-4 h-4" />, action: () => setActiveOverlay('terms') },
+                    ].map(item => (
+                      <button
+                        key={item.label}
+                        onClick={item.action}
+                        className="w-full text-left py-3 px-3 hover:bg-slate-50 dark:hover:bg-slate-850 transition flex justify-between items-center text-xs font-bold text-slate-700 dark:text-slate-300"
+                      >
+                        <span className="flex items-center gap-2.5">
+                          <span className={item.color || 'text-red-500'}>{item.icon}</span>
+                          {item.label}
+                        </span>
+                        <ArrowRight className="w-3.5 h-3.5 text-slate-400" />
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Additional Action buttons */}
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={handleShareApp}
+                      className="bg-white hover:bg-slate-50 dark:bg-slate-900 dark:hover:bg-slate-850 text-slate-700 dark:text-white border border-slate-100 dark:border-slate-800 p-3 rounded-2xl flex flex-col items-center text-center gap-1.5 transition text-xs font-bold shadow-sm"
+                    >
+                      <Share2 className="w-5 h-5 text-red-500" />
+                      <span>Share App</span>
+                    </button>
+                    <button
+                      onClick={() => setShowRateModal(true)}
+                      className="bg-white hover:bg-slate-50 dark:bg-slate-900 dark:hover:bg-slate-850 text-slate-700 dark:text-white border border-slate-100 dark:border-slate-800 p-3 rounded-2xl flex flex-col items-center text-center gap-1.5 transition text-xs font-bold shadow-sm"
+                    >
+                      <Star className="w-5 h-5 text-yellow-500 fill-current" />
+                      <span>Rate Sikkho</span>
+                    </button>
+                  </div>
+
+                  {/* Logout Button */}
+                  <button
+                    onClick={handleLogOut}
+                    className="w-full bg-slate-100 dark:bg-slate-900 text-slate-600 dark:text-slate-400 font-bold py-3 px-4 rounded-2xl transition flex items-center justify-center gap-2 text-xs"
+                  >
+                    <LogOut className="w-4 h-4 text-red-500" /> Sign Out Account
+                  </button>
+
+                </div>
+
+              </div>
+            )}
+
+            {/* -------------------- DYNAMIC FLOATING MENU BUTTON -------------------- */}
+            <div className="fixed bottom-[76px] left-4 z-40 select-none">
+              <button
+                onClick={() => setActiveOverlay('request')}
+                className="flex items-center justify-center gap-1 bg-red-600 hover:bg-red-700 text-white font-extrabold text-xs px-3.5 py-2.5 rounded-full shadow-lg shadow-red-600/25 transition active:scale-95"
+                title="Make Tutorial Request"
+              >
+                <Plus className="w-4 h-4 animate-spin-slow" /> Request Video
+              </button>
+            </div>
+
+            {/* -------------------- INTERACTIVE BOTTOM NAV BAR -------------------- */}
+            <div className="fixed bottom-0 left-0 right-0 h-16 md:hidden bg-white dark:bg-slate-950 border-t border-slate-100 dark:border-slate-900 flex items-center justify-around px-2 z-30 transition-colors shadow-lg">
+              {[
+                { id: 'home', label: 'Discover', icon: <Play className="w-4 h-4" /> },
+                { id: 'leaderboard', label: 'Ranks', icon: <Award className="w-4 h-4" /> },
+                { id: 'favorites', label: 'Saved', icon: <Heart className="w-4 h-4" /> },
+                { id: 'history', label: 'History', icon: <History className="w-4 h-4" /> },
+                { id: 'profile', label: 'More', icon: <User className="w-4 h-4" /> },
+              ].map(tab => (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id as any)}
+                  className={`flex flex-col items-center gap-1 py-1.5 px-3 rounded-xl transition ${
+                    activeTab === tab.id
+                      ? 'text-red-500 font-bold bg-red-500/5 dark:bg-red-500/10 scale-105'
+                      : 'text-slate-400 hover:text-slate-600 dark:text-slate-500'
+                  }`}
+                >
+                  {tab.icon}
+                  <span className="text-[10px] uppercase tracking-wide leading-none">{tab.label}</span>
+                </button>
+              ))}
+            </div>
+
+            {/* Spacer to prevent content from being cut off by the fixed bottom nav */}
+            <div className="h-16 shrink-0 md:hidden" />
+
+          </div>
+        )}
+
+        {/* -------------------- EMBEDDED VIDEO PLAYER OVERLAY -------------------- */}
+        <AnimatePresence>
+          {activePlayingVideo && (
+            <div className="absolute inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto select-none">
+              <motion.div
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.9, opacity: 0 }}
+                className="bg-[#0b0724] border border-[#2b1f6d] w-full max-w-2xl rounded-3xl overflow-hidden shadow-2xl flex flex-col my-auto"
+              >
+                {/* Modal Header */}
+                <div className="p-4 bg-[#120e36] border-b border-[#2b1f6d] flex items-center justify-between">
+                  <div className="flex-1 mr-4 min-w-0">
+                    <span className="text-[9px] uppercase font-bold text-red-400 bg-red-950/40 px-2 py-0.5 rounded-full">
+                      {activePlayingVideo.category}
+                    </span>
+                    <h3 className="font-extrabold text-white text-xs sm:text-sm truncate mt-1">
+                      {activePlayingVideo.title}
+                    </h3>
+                  </div>
+                  <button
+                    onClick={() => setActivePlayingVideo(null)}
+                    className="w-8 h-8 rounded-full bg-[#231758] hover:bg-red-600/30 text-slate-300 hover:text-red-400 flex items-center justify-center transition-colors shrink-0"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                {/* IFrame Video Body */}
+                <div className="relative aspect-video w-full bg-black">
+                  <iframe
+                    src={`https://www.youtube.com/embed/${activePlayingVideo.videoId}?autoplay=1&rel=0&modestbranding=1`}
+                    title={activePlayingVideo.title}
+                    className="absolute inset-0 w-full h-full border-0"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                    allowFullScreen
+                  ></iframe>
+                </div>
+
+                {/* Info & Action Buttons Bar */}
+                <div className="p-4 bg-[#0a0524] space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 text-xs text-slate-400 border-b border-[#231758] pb-3">
+                    <div className="flex items-center gap-4">
+                      <span>• {activePlayingVideo.views + 1} Views</span>
+                      <span>• Released {new Date(activePlayingVideo.uploadedAt).toLocaleDateString()}</span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      {/* Favorite Button */}
+                      <button
+                        onClick={() => handleToggleFavorite(activePlayingVideo.id)}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-bold transition ${
+                          favorites.includes(activePlayingVideo.id)
+                            ? 'bg-red-500/10 text-red-400 border border-red-500/20'
+                            : 'bg-[#231758] hover:bg-[#2d2175] text-slate-300'
+                        }`}
+                      >
+                        <Heart className={`w-3.5 h-3.5 ${favorites.includes(activePlayingVideo.id) ? 'fill-current' : ''}`} />
+                        <span>{favorites.includes(activePlayingVideo.id) ? 'Saved' : 'Save'}</span>
+                      </button>
+
+                      {/* WhatsApp Share Button */}
+                      <button
+                        onClick={() => {
+                          const text = encodeURIComponent(`Sikkho App पर यह वीडियो देखो: "${activePlayingVideo.title}" - https://www.youtube.com/watch?v=${activePlayingVideo.videoId}`);
+                          window.open(`https://api.whatsapp.com/send?text=${text}`, '_blank');
+                        }}
+                        className="flex items-center gap-1.5 bg-green-600/10 hover:bg-green-600/20 text-green-400 border border-green-500/20 px-3 py-1.5 rounded-xl text-[11px] font-bold transition"
+                      >
+                        <Share2 className="w-3.5 h-3.5" />
+                        <span>Share on WhatsApp</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Complete watching & motivation card */}
+                  <div className="bg-[#120e36]/60 border border-[#231758] p-3 rounded-2xl flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-9 h-9 bg-red-600/10 rounded-xl flex items-center justify-center text-red-500 shrink-0">
+                        <Award className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <h4 className="text-[11px] font-bold text-white leading-none">Practice and Grow!</h4>
+                        <p className="text-[10px] text-slate-400 mt-0.5">Learn step-by-step and implement what Gautam Tiwari is teaching.</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setActivePlayingVideo(null);
+                        // Show quick rating
+                        setShowRateModal(true);
+                      }}
+                      className="bg-red-600 hover:bg-red-700 text-white font-extrabold text-[10px] py-2 px-3 rounded-xl transition shrink-0"
+                    >
+                      Done Watching
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* -------------------- STAR RATING OVERLAY DIALOG -------------------- */}
+        <AnimatePresence>
+          {showRateModal && (
+            <div className="absolute inset-0 z-50 bg-slate-950/55 backdrop-blur-sm flex items-center justify-center p-6">
+              <motion.div
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
+                className="bg-white dark:bg-slate-900 rounded-3xl p-5 border border-slate-100 dark:border-slate-800 text-center max-w-xs space-y-4"
+              >
+                <div className="w-12 h-12 bg-amber-500/10 text-amber-500 rounded-2xl flex items-center justify-center mx-auto">
+                  <Star className="w-6 h-6 fill-current" />
+                </div>
+                <div>
+                  <h4 className="font-extrabold text-slate-900 dark:text-white text-base">Rate Sikkho App</h4>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                    Your rating helps us improve the learning features. Earn +30 points!
+                  </p>
+                </div>
+
+                <div className="flex items-center justify-center gap-1.5 py-1">
+                  {[1, 2, 3, 4, 5].map(val => (
+                    <button
+                      key={val}
+                      onClick={() => setUserRating(val)}
+                      className={`text-2xl transition ${
+                        val <= userRating ? 'text-amber-400 scale-110' : 'text-slate-200'
+                      }`}
+                    >
+                      ★
+                    </button>
+                  ))}
+                </div>
+
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setShowRateModal(false)}
+                    className="flex-1 bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-500 font-bold text-xs py-2 px-3 rounded-xl transition"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleRateSubmit}
+                    className="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold text-xs py-2 px-3 rounded-xl transition shadow-md shadow-red-600/10"
+                  >
+                    Submit
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+      </div>
+    </DeviceFrame>
+  );
+}

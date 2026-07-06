@@ -1,0 +1,6 @@
+{
+  "name": "Sikkho",
+  "description": "A premium, responsive portal for YouTube learning videos, interactive requests, subscriber progress, and a points leaderboard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

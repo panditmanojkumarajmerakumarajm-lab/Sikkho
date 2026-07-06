@@ -1,0 +1,44 @@
+@import "tailwindcss";
+
+@variant dark (.dark &);
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;900&family=Space+Grotesk:wght@400;500;700&display=swap');
+
+@layer base {
+  body {
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+  
+  h1, h2, h3, h4, .font-display {
+    font-family: 'Space Grotesk', system-ui, sans-serif;
+  }
+}
+
+/* Custom Scrollbars */
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-none {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 4px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: rgba(156, 163, 175, 0.3);
+  border-radius: 99px;
+}
+
+/* Smooth Rotation Animation for Admin Cog Icon */
+@keyframes spin-slow {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+.animate-spin-slow {
+  animation: spin-slow 10s linear infinite;
+}

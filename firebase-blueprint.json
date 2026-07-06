@@ -1,0 +1,132 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "User account information, activity points, and referral metrics.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "The Firebase Auth user ID" },
+        "name": { "type": "string", "description": "User's full name" },
+        "email": { "type": "string", "description": "User's email address" },
+        "photoUrl": { "type": "string", "description": "User's profile image URL" },
+        "referralCode": { "type": "string", "description": "Unique referral code for sharing" },
+        "referredBy": { "type": "string", "description": "The referral code of the user who invited them" },
+        "referralCount": { "type": "integer", "description": "Total number of successful referrals" },
+        "points": { "type": "integer", "description": "Activity points for ranking" },
+        "badge": { "type": "string", "enum": ["Bronze", "Silver", "Gold", "Platinum", "Diamond"], "description": "Ranking tier badge" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Account registration timestamp" },
+        "lastActive": { "type": "string", "format": "date-time", "description": "Last user session timestamp" }
+      },
+      "required": ["uid", "name", "email", "referralCode", "points", "referralCount", "badge"]
+    },
+    "Video": {
+      "title": "YouTube Video",
+      "description": "Information about a YouTube video that users can discover.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Firestore document ID or videoId" },
+        "videoUrl": { "type": "string", "description": "Full YouTube URL" },
+        "videoId": { "type": "string", "description": "Parsed YouTube Video ID" },
+        "title": { "type": "string", "description": "YouTube video title" },
+        "thumbnail": { "type": "string", "description": "YouTube video thumbnail URL" },
+        "category": { "type": "string", "description": "Category for filtering" },
+        "uploadedAt": { "type": "string", "format": "date-time", "description": "Timestamp of upload" },
+        "views": { "type": "integer", "description": "Number of clicks or views in app" }
+      },
+      "required": ["videoUrl", "videoId", "title", "thumbnail", "uploadedAt"]
+    },
+    "Banner": {
+      "title": "Banner Slider",
+      "description": "Banner slides displayed on the Home Screen slider.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "imageUrl": { "type": "string", "description": "Banner image URL" },
+        "title": { "type": "string", "description": "Optional banner heading" },
+        "videoUrl": { "type": "string", "description": "YouTube link when clicked" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["imageUrl"]
+    },
+    "VideoRequest": {
+      "title": "Video/Remix Request",
+      "description": "A user-submitted request for a video tutorial or remix.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string", "description": "Requester name" },
+        "mobile": { "type": "string", "description": "Requester phone number" },
+        "videoUrl": { "type": "string", "description": "Optional reference video URL" },
+        "message": { "type": "string", "description": "Request details" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "mobile", "message", "createdAt"]
+    },
+    "Feedback": {
+      "title": "User Feedback",
+      "description": "Feedback message submitted by users.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string", "description": "User name" },
+        "email": { "type": "string", "description": "User email" },
+        "message": { "type": "string", "description": "Feedback message text" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "email", "message", "createdAt"]
+    },
+    "AppNotification": {
+      "title": "Push Notification",
+      "description": "FCM Notifications sent out by the Admin.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string", "description": "Notification heading" },
+        "message": { "type": "string", "description": "Body description" },
+        "type": { "type": "string", "enum": ["New Video", "Announcement", "Live Stream"] },
+        "sentAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "message", "type", "sentAt"]
+    },
+    "AppConfig": {
+      "title": "App Configurations",
+      "description": "Global settings like Subscriber Goal tracking.",
+      "type": "object",
+      "properties": {
+        "subscriberGoal": { "type": "integer" },
+        "currentSubscribers": { "type": "integer" }
+      },
+      "required": ["subscriberGoal", "currentSubscribers"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": "User",
+      "description": "User profile records indexed by auth UID"
+    },
+    "/videos/{videoId}": {
+      "schema": "Video",
+      "description": "Discovered YouTube videos curated by the admin"
+    },
+    "/banners/{bannerId}": {
+      "schema": "Banner",
+      "description": "Home Screen slide cards"
+    },
+    "/requests/{requestId}": {
+      "schema": "VideoRequest",
+      "description": "Remix or tutorial requests from users"
+    },
+    "/feedbacks/{feedbackId}": {
+      "schema": "Feedback",
+      "description": "User feedbacks"
+    },
+    "/notifications/{notificationId}": {
+      "schema": "AppNotification",
+      "description": "List of sent announcements and notifications"
+    },
+    "/config/global": {
+      "schema": "AppConfig",
+      "description": "Global config values like goals"
+    }
+  }
+}
