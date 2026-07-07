@@ -5,11 +5,11 @@ import {
   Plus, Bell, Shield, HelpCircle, GraduationCap, Flame, MessageSquare, 
   LogIn, LogOut, CheckCircle2, Phone, Sparkles, Navigation, Menu, 
   Info, RefreshCw, Star, ArrowUpRight, ArrowRight, ChevronLeft, ChevronRight, Check, X,
-  Mail, Lock, Gift, Moon, Sun, TrendingUp
+  Mail, Lock, Gift, Moon, Sun, TrendingUp, ThumbsUp, ThumbsDown, Trash2, Copy, ExternalLink, MessageCircle, Download
 } from 'lucide-react';
 
 import { 
-  collection, doc, getDoc, getDocs, setDoc, updateDoc, onSnapshot, query, orderBy, limit 
+  collection, doc, getDoc, getDocs, setDoc, updateDoc, onSnapshot, query, orderBy, limit, where, deleteDoc 
 } from 'firebase/firestore';
 import { onAuthStateChanged, signOut, signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
 import { 
@@ -23,7 +23,7 @@ import {
   handleFirestoreError,
   OperationType
 } from './lib/firebase';
-import { UserProfile, Video, BannerSlide, AppNotification, AppConfig } from './types';
+import { UserProfile, Video, BannerSlide, AppNotification, AppConfig, VideoComment, VideoInteraction } from './types';
 
 // Components
 import DeviceFrame from './components/DeviceFrame';
@@ -34,6 +34,18 @@ import Leaderboard from './components/Leaderboard';
 import AdminPanel from './components/AdminPanel';
 import VideoRequestModal from './components/VideoRequestModal';
 import { FAQ, Feedback, AboutDeveloper, PrivacyPolicy, TermsConditions, UpdateChecker } from './components/Pages';
+
+const checkIfAdmin = (email: string | null | undefined): boolean => {
+  if (!email) return false;
+  const sanitized = email.trim().toLowerCase();
+  return (
+    sanitized === 'tiwarigautam819@gmail.com' ||
+    sanitized === 'vikajaat227@gmail.com' ||
+    sanitized === '8955932061@sikkho.com' ||
+    sanitized === '918955932061@sikkho.com' ||
+    sanitized === '+918955932061@sikkho.com'
+  );
+};
 
 export default function App() {
   // App view cycles
@@ -91,6 +103,14 @@ export default function App() {
 
   // Embedded Video Player state
   const [activePlayingVideo, setActivePlayingVideo] = useState<Video | null>(null);
+  const [activeVideoComments, setActiveVideoComments] = useState<VideoComment[]>([]);
+  const [activeVideoInteraction, setActiveVideoInteraction] = useState<VideoInteraction | null>(null);
+  const [newCommentText, setNewCommentText] = useState('');
+  const [showShareModal, setShowShareModal] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [isDownloaded, setIsDownloaded] = useState(false);
+  const [activePlayerTab, setActivePlayerTab] = useState<'comments' | 'about'>('comments');
 
   // Initialize and Seed data
   useEffect(() => {
@@ -191,9 +211,7 @@ export default function App() {
           if (profileDoc.exists()) {
             const profile = profileDoc.data() as UserProfile;
             setCurrentUser(profile);
-            setIsAdmin(
-              profile.email === 'tiwarigautam819@gmail.com'
-            );
+            setIsAdmin(checkIfAdmin(profile.email));
           } else {
             // If Firestore is slow or rule blocked, generate default profile in state
             const mockProfile: UserProfile = {
@@ -269,6 +287,67 @@ export default function App() {
       unsubUsers();
     };
   }, [currentUser]);
+
+  // Listen for Comments and User Interaction on the active playing video
+  useEffect(() => {
+    if (!activePlayingVideo) {
+      setActiveVideoComments([]);
+      setActiveVideoInteraction(null);
+      setIsDownloaded(false);
+      setDownloadProgress(0);
+      setIsDownloading(false);
+      return;
+    }
+
+    const videoId = activePlayingVideo.id;
+
+    // Reset download status check - we can save mock offline downloads in localStorage
+    const downloadedList = JSON.parse(localStorage.getItem('sikkho_offline_downloads') || '[]');
+    setIsDownloaded(downloadedList.includes(videoId));
+
+    // 1. Comments Listener
+    const unsubComments = onSnapshot(
+      query(
+        collection(db, 'comments'),
+        where('videoId', '==', videoId),
+        orderBy('createdAt', 'desc')
+      ),
+      (snap) => {
+        const list: VideoComment[] = [];
+        snap.forEach((d) => {
+          list.push({ id: d.id, ...d.data() } as VideoComment);
+        });
+        setActiveVideoComments(list);
+      },
+      (error) => {
+        console.warn('Comments listener error:', error);
+      }
+    );
+
+    // 2. User Video Interaction (Like/Dislike) Listener
+    let unsubInteraction = () => {};
+    if (currentUser) {
+      const interactionId = `${currentUser.uid}_${videoId}`;
+      unsubInteraction = onSnapshot(
+        doc(db, 'video_interactions', interactionId),
+        (docSnap) => {
+          if (docSnap.exists()) {
+            setActiveVideoInteraction({ id: docSnap.id, ...docSnap.data() } as VideoInteraction);
+          } else {
+            setActiveVideoInteraction(null);
+          }
+        },
+        (error) => {
+          console.warn('Interactions listener error:', error);
+        }
+      );
+    }
+
+    return () => {
+      unsubComments();
+      unsubInteraction();
+    };
+  }, [activePlayingVideo?.id, currentUser?.uid]);
 
   // Synchronize dark mode class with HTML document element and local storage
   useEffect(() => {
@@ -386,7 +465,7 @@ export default function App() {
       }
 
       const refCode = 'SIKKHO-' + (loginName || 'User').substring(0, 3).toUpperCase() + Math.floor(100 + Math.random() * 900);
-      const isUserAdmin = email === 'tiwarigautam819@gmail.com';
+      const isUserAdmin = checkIfAdmin(email);
 
       // Assemble or retrieve User Profile Data
       const docRef = doc(db, COLLECTIONS.USERS, uid);
@@ -475,7 +554,7 @@ export default function App() {
       }
       
       const refCode = 'SIKKHO-' + (name || 'Google User').substring(0, 3).toUpperCase() + Math.floor(100 + Math.random() * 900);
-      const isUserAdmin = sanitizedEmail === 'tiwarigautam819@gmail.com';
+      const isUserAdmin = checkIfAdmin(sanitizedEmail);
       
       const docRef = doc(db, COLLECTIONS.USERS, uid);
       const docSnap = await getDoc(docRef);
@@ -587,6 +666,153 @@ export default function App() {
       };
       setActivePlayingVideo(transientVideo);
     }
+  };
+
+  // Toggle Like or Dislike on curated video
+  const handleToggleLikeDislike = async (type: 'like' | 'dislike') => {
+    if (!currentUser || !activePlayingVideo) return;
+    const videoId = activePlayingVideo.id;
+    const interactionId = `${currentUser.uid}_${videoId}`;
+    const interactionRef = doc(db, 'video_interactions', interactionId);
+    const videoRef = doc(db, COLLECTIONS.VIDEOS, videoId);
+
+    const currentType = activeVideoInteraction?.type || null;
+
+    let likesDiff = 0;
+    let dislikesDiff = 0;
+    let nextType: 'like' | 'dislike' | null = null;
+
+    if (type === 'like') {
+      if (currentType === 'like') {
+        likesDiff = -1;
+        nextType = null;
+      } else if (currentType === 'dislike') {
+        likesDiff = 1;
+        dislikesDiff = -1;
+        nextType = 'like';
+      } else {
+        likesDiff = 1;
+        nextType = 'like';
+      }
+    } else {
+      if (currentType === 'dislike') {
+        dislikesDiff = -1;
+        nextType = null;
+      } else if (currentType === 'like') {
+        likesDiff = -1;
+        dislikesDiff = 1;
+        nextType = 'dislike';
+      } else {
+        dislikesDiff = 1;
+        nextType = 'dislike';
+      }
+    }
+
+    try {
+      if (nextType === null) {
+        await deleteDoc(interactionRef);
+      } else {
+        await setDoc(interactionRef, {
+          userId: currentUser.uid,
+          videoId,
+          type: nextType,
+          updatedAt: new Date().toISOString()
+        });
+      }
+
+      const newLikesCount = Math.max(0, (activePlayingVideo.likesCount || 0) + likesDiff);
+      const newDislikesCount = Math.max(0, (activePlayingVideo.dislikesCount || 0) + dislikesDiff);
+
+      await updateDoc(videoRef, {
+        likesCount: newLikesCount,
+        dislikesCount: newDislikesCount
+      });
+
+      setActivePlayingVideo(prev => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          likesCount: newLikesCount,
+          dislikesCount: newDislikesCount
+        };
+      });
+
+      // Give 5 activity points for engaging with likes/dislikes!
+      if (nextType !== null && currentType === null) {
+        addPoints(5);
+      }
+    } catch (err) {
+      console.warn('Error toggling like/dislike:', err);
+    }
+  };
+
+  // Add Comment to video
+  const handleAddComment = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!currentUser || !activePlayingVideo || !newCommentText.trim()) return;
+
+    const textVal = newCommentText.trim();
+    setNewCommentText('');
+
+    try {
+      const commentId = `comment_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
+      await setDoc(doc(db, 'comments', commentId), {
+        videoId: activePlayingVideo.id,
+        userId: currentUser.uid,
+        userName: currentUser.name,
+        userEmail: currentUser.email,
+        text: textVal,
+        createdAt: new Date().toISOString()
+      });
+
+      // Add 10 points on posting a comment
+      addPoints(10);
+    } catch (err) {
+      console.warn('Error adding comment:', err);
+    }
+  };
+
+  // Delete Comment from video
+  const handleDeleteComment = async (commentId: string) => {
+    if (!currentUser) return;
+    try {
+      await deleteDoc(doc(db, 'comments', commentId));
+    } catch (err) {
+      console.warn('Error deleting comment:', err);
+    }
+  };
+
+  // Download video offline (Mocked for premium experience)
+  const handleMockDownload = () => {
+    if (!activePlayingVideo) return;
+    if (isDownloaded) {
+      const downloadedList = JSON.parse(localStorage.getItem('sikkho_offline_downloads') || '[]');
+      const updated = downloadedList.filter((id: string) => id !== activePlayingVideo.id);
+      localStorage.setItem('sikkho_offline_downloads', JSON.stringify(updated));
+      setIsDownloaded(false);
+      return;
+    }
+
+    setIsDownloading(true);
+    setDownloadProgress(0);
+
+    const interval = setInterval(() => {
+      setDownloadProgress((prev) => {
+        if (prev >= 100) {
+          clearInterval(interval);
+          setIsDownloading(false);
+          setIsDownloaded(true);
+          const downloadedList = JSON.parse(localStorage.getItem('sikkho_offline_downloads') || '[]');
+          if (!downloadedList.includes(activePlayingVideo.id)) {
+            downloadedList.push(activePlayingVideo.id);
+            localStorage.setItem('sikkho_offline_downloads', JSON.stringify(downloadedList));
+          }
+          addPoints(15); // Reward 15 activity points for offline saving
+          return 100;
+        }
+        return prev + 20;
+      });
+    }, 250);
   };
 
   // Pull to Refresh Handler
@@ -1383,25 +1609,30 @@ export default function App() {
         {/* -------------------- EMBEDDED VIDEO PLAYER OVERLAY -------------------- */}
         <AnimatePresence>
           {activePlayingVideo && (
-            <div className="absolute inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto select-none">
+            <div className="absolute inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-2 sm:p-4 overflow-y-auto select-none">
               <motion.div
-                initial={{ scale: 0.9, opacity: 0 }}
+                initial={{ scale: 0.95, opacity: 0 }}
                 animate={{ scale: 1, opacity: 1 }}
-                exit={{ scale: 0.9, opacity: 0 }}
-                className="bg-[#0b0724] border border-[#2b1f6d] w-full max-w-2xl rounded-3xl overflow-hidden shadow-2xl flex flex-col my-auto"
+                exit={{ scale: 0.95, opacity: 0 }}
+                className="bg-[#0b0724] border border-[#2b1f6d] w-full max-w-2xl rounded-3xl overflow-hidden shadow-2xl flex flex-col my-auto max-h-[95vh]"
               >
                 {/* Modal Header */}
-                <div className="p-4 bg-[#120e36] border-b border-[#2b1f6d] flex items-center justify-between">
+                <div className="p-3.5 bg-[#120e36] border-b border-[#2b1f6d] flex items-center justify-between shrink-0">
                   <div className="flex-1 mr-4 min-w-0">
-                    <span className="text-[9px] uppercase font-bold text-red-400 bg-red-950/40 px-2 py-0.5 rounded-full">
-                      {activePlayingVideo.category}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[9px] uppercase font-black text-red-400 bg-red-950/50 border border-red-900/30 px-2 py-0.5 rounded-full">
+                        {activePlayingVideo.category}
+                      </span>
+                    </div>
                     <h3 className="font-extrabold text-white text-xs sm:text-sm truncate mt-1">
                       {activePlayingVideo.title}
                     </h3>
                   </div>
                   <button
-                    onClick={() => setActivePlayingVideo(null)}
+                    onClick={() => {
+                      setActivePlayingVideo(null);
+                      setActivePlayerTab('comments');
+                    }}
                     className="w-8 h-8 rounded-full bg-[#231758] hover:bg-red-600/30 text-slate-300 hover:text-red-400 flex items-center justify-center transition-colors shrink-0"
                   >
                     <X className="w-4 h-4" />
@@ -1409,7 +1640,7 @@ export default function App() {
                 </div>
 
                 {/* IFrame Video Body */}
-                <div className="relative aspect-video w-full bg-black">
+                <div className="relative aspect-video w-full bg-black shrink-0 shadow-lg">
                   <iframe
                     src={`https://www.youtube.com/embed/${activePlayingVideo.videoId}?autoplay=1&rel=0&modestbranding=1`}
                     title={activePlayingVideo.title}
@@ -1419,66 +1650,320 @@ export default function App() {
                   ></iframe>
                 </div>
 
-                {/* Info & Action Buttons Bar */}
-                <div className="p-4 bg-[#0a0524] space-y-4">
-                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 text-xs text-slate-400 border-b border-[#231758] pb-3">
-                    <div className="flex items-center gap-4">
-                      <span>• {activePlayingVideo.views + 1} Views</span>
-                      <span>• Released {new Date(activePlayingVideo.uploadedAt).toLocaleDateString()}</span>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      {/* Favorite Button */}
-                      <button
-                        onClick={() => handleToggleFavorite(activePlayingVideo.id)}
-                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-bold transition ${
-                          favorites.includes(activePlayingVideo.id)
-                            ? 'bg-red-500/10 text-red-400 border border-red-500/20'
-                            : 'bg-[#231758] hover:bg-[#2d2175] text-slate-300'
-                        }`}
-                      >
-                        <Heart className={`w-3.5 h-3.5 ${favorites.includes(activePlayingVideo.id) ? 'fill-current' : ''}`} />
-                        <span>{favorites.includes(activePlayingVideo.id) ? 'Saved' : 'Save'}</span>
-                      </button>
-
-                      {/* WhatsApp Share Button */}
-                      <button
-                        onClick={() => {
-                          const text = encodeURIComponent(`Sikkho App पर यह वीडियो देखो: "${activePlayingVideo.title}" - https://www.youtube.com/watch?v=${activePlayingVideo.videoId}`);
-                          window.open(`https://api.whatsapp.com/send?text=${text}`, '_blank');
-                        }}
-                        className="flex items-center gap-1.5 bg-green-600/10 hover:bg-green-600/20 text-green-400 border border-green-500/20 px-3 py-1.5 rounded-xl text-[11px] font-bold transition"
-                      >
-                        <Share2 className="w-3.5 h-3.5" />
-                        <span>Share on WhatsApp</span>
-                      </button>
-                    </div>
+                {/* --- YOUTUBE PREMIUM ACTION BAR --- */}
+                <div className="bg-[#09051e] border-b border-[#2b1f6d]/60 px-4 py-3 flex items-center justify-between gap-2 overflow-x-auto scrollbar-none shrink-0">
+                  {/* Likes/Dislikes Capsule */}
+                  <div className="bg-[#1b1248]/80 rounded-full flex items-center p-0.5 border border-[#2b1f6d]/40 select-none shrink-0">
+                    <button
+                      onClick={() => handleToggleLikeDislike('like')}
+                      className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-[11px] font-bold transition-all active:scale-95 ${
+                        activeVideoInteraction?.type === 'like'
+                          ? 'bg-red-600 text-white shadow-md'
+                          : 'text-slate-300 hover:bg-[#281b6c]'
+                      }`}
+                    >
+                      <ThumbsUp className={`w-3.5 h-3.5 ${activeVideoInteraction?.type === 'like' ? 'fill-current' : ''}`} />
+                      <span>{activePlayingVideo.likesCount || 0}</span>
+                    </button>
+                    <div className="w-[1px] h-4 bg-[#2b1f6d] my-auto" />
+                    <button
+                      onClick={() => handleToggleLikeDislike('dislike')}
+                      className={`flex items-center justify-center p-1.5 rounded-full transition-all active:scale-95 ${
+                        activeVideoInteraction?.type === 'dislike'
+                          ? 'bg-slate-700 text-white'
+                          : 'text-slate-400 hover:bg-[#281b6c]'
+                      }`}
+                    >
+                      <ThumbsDown className={`w-3.5 h-3.5 ${activeVideoInteraction?.type === 'dislike' ? 'fill-current' : ''}`} />
+                    </button>
                   </div>
 
-                  {/* Complete watching & motivation card */}
-                  <div className="bg-[#120e36]/60 border border-[#231758] p-3 rounded-2xl flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2.5">
-                      <div className="w-9 h-9 bg-red-600/10 rounded-xl flex items-center justify-center text-red-500 shrink-0">
-                        <Award className="w-5 h-5" />
-                      </div>
-                      <div>
-                        <h4 className="text-[11px] font-bold text-white leading-none">Practice and Grow!</h4>
-                        <p className="text-[10px] text-slate-400 mt-0.5">Learn step-by-step and implement what Gautam Tiwari is teaching.</p>
-                      </div>
-                    </div>
+                  {/* Operational Controls group */}
+                  <div className="flex items-center gap-2 shrink-0">
+                    {/* Share capsule */}
                     <button
-                      onClick={() => {
-                        setActivePlayingVideo(null);
-                        // Show quick rating
-                        setShowRateModal(true);
-                      }}
-                      className="bg-red-600 hover:bg-red-700 text-white font-extrabold text-[10px] py-2 px-3 rounded-xl transition shrink-0"
+                      onClick={() => setShowShareModal(true)}
+                      className="bg-[#1b1248]/80 hover:bg-[#281b6c] text-slate-300 border border-[#2b1f6d]/40 px-3.5 py-2 rounded-full text-[11px] font-bold flex items-center gap-1.5 transition-all active:scale-95"
                     >
-                      Done Watching
+                      <Share2 className="w-3.5 h-3.5 text-red-400" />
+                      <span>Share</span>
+                    </button>
+
+                    {/* Download capsule */}
+                    <button
+                      onClick={handleMockDownload}
+                      disabled={isDownloading}
+                      className={`px-3.5 py-2 rounded-full text-[11px] font-bold flex items-center gap-1.5 transition-all active:scale-95 border ${
+                        isDownloaded
+                          ? 'bg-emerald-600/10 text-emerald-400 border-emerald-500/20'
+                          : isDownloading
+                          ? 'bg-amber-600/10 text-amber-400 border-amber-500/20 cursor-not-allowed'
+                          : 'bg-[#1b1248]/80 hover:bg-[#281b6c] text-slate-300 border-[#2b1f6d]/40'
+                      }`}
+                    >
+                      <Download className={`w-3.5 h-3.5 ${isDownloading ? 'animate-bounce' : ''}`} />
+                      <span>
+                        {isDownloaded ? 'Downloaded' : isDownloading ? `Downloading ${downloadProgress}%` : 'Offline Save'}
+                      </span>
+                    </button>
+
+                    {/* Bookmark/Favorite capsule */}
+                    <button
+                      onClick={() => handleToggleFavorite(activePlayingVideo.id)}
+                      className={`px-3.5 py-2 rounded-full text-[11px] font-bold flex items-center gap-1.5 transition-all active:scale-95 border ${
+                        favorites.includes(activePlayingVideo.id)
+                          ? 'bg-red-500/15 text-red-400 border-red-500/30'
+                          : 'bg-[#1b1248]/80 hover:bg-[#281b6c] text-slate-300 border-[#2b1f6d]/40'
+                      }`}
+                    >
+                      <Heart className={`w-3.5 h-3.5 ${favorites.includes(activePlayingVideo.id) ? 'fill-current text-red-500' : ''}`} />
+                      <span>{favorites.includes(activePlayingVideo.id) ? 'Saved' : 'Save'}</span>
                     </button>
                   </div>
                 </div>
+
+                {/* --- NAVIGATION TABS WITHIN THE PLAYER CARD --- */}
+                <div className="bg-[#110c32] px-4 flex border-b border-[#2b1f6d]/40 shrink-0">
+                  <button
+                    onClick={() => setActivePlayerTab('comments')}
+                    className={`py-2 px-4 text-xs font-black uppercase tracking-wider relative transition-colors ${
+                      activePlayerTab === 'comments' ? 'text-red-400' : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Comments ({activeVideoComments.length})
+                    {activePlayerTab === 'comments' && (
+                      <motion.div layoutId="tabLine" className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-500" />
+                    )}
+                  </button>
+                  <button
+                    onClick={() => setActivePlayerTab('about')}
+                    className={`py-2 px-4 text-xs font-black uppercase tracking-wider relative transition-colors ${
+                      activePlayerTab === 'about' ? 'text-red-400' : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    About Lesson
+                    {activePlayerTab === 'about' && (
+                      <motion.div layoutId="tabLine" className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-500" />
+                    )}
+                  </button>
+                </div>
+
+                {/* --- TAB CONTENT CONTAINER --- */}
+                <div className="flex-1 overflow-y-auto p-4 bg-[#0a0520] flex flex-col min-h-[180px] max-h-[350px]">
+                  {activePlayerTab === 'comments' ? (
+                    <div className="flex-1 flex flex-col space-y-4">
+                      {/* Live Comment Entry Input Form */}
+                      <form onSubmit={handleAddComment} className="flex gap-2.5 items-start">
+                        <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-red-600 to-pink-500 flex items-center justify-center text-white text-[11px] font-black uppercase shadow shadow-red-500/10 shrink-0">
+                          {currentUser?.name ? currentUser.name[0] : 'U'}
+                        </div>
+                        <div className="flex-1 relative">
+                          <input
+                            type="text"
+                            value={newCommentText}
+                            onChange={(e) => setNewCommentText(e.target.value)}
+                            placeholder="Add a public in-app comment..."
+                            className="w-full bg-[#150d40] border border-[#2b1f6d]/60 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-400 focus:outline-none focus:border-red-500 transition-colors pr-10"
+                          />
+                          <button
+                            type="submit"
+                            disabled={!newCommentText.trim()}
+                            className="absolute right-1.5 top-1.5 w-7 h-7 bg-red-600 hover:bg-red-700 disabled:bg-[#1f194c] text-white disabled:text-slate-500 rounded-lg flex items-center justify-center transition active:scale-95 shrink-0"
+                          >
+                            <Send className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </form>
+
+                      {/* Comments Feed List */}
+                      <div className="space-y-3.5 overflow-y-auto flex-1 pr-1 select-none">
+                        {activeVideoComments.length === 0 ? (
+                          <div className="text-center py-8 text-slate-500 flex flex-col items-center gap-1.5">
+                            <MessageCircle className="w-8 h-8 text-slate-600" />
+                            <span className="text-xs font-semibold">No comments yet. Be the first to share your thoughts!</span>
+                          </div>
+                        ) : (
+                          activeVideoComments.map((comment) => {
+                            const isOwnComment = currentUser?.uid === comment.userId;
+                            return (
+                              <div key={comment.id} className="flex gap-2.5 items-start bg-[#120a3a]/40 p-2.5 rounded-2xl border border-[#231758]/35 hover:bg-[#120a3a]/70 transition-colors group">
+                                <div className="w-7 h-7 rounded-full bg-purple-700/80 flex items-center justify-center text-white text-[10px] font-bold uppercase shrink-0">
+                                  {comment.userName ? comment.userName[0] : 'U'}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center justify-between gap-1">
+                                    <span className="font-extrabold text-white text-[11px] truncate">
+                                      {comment.userName || 'Anonymous User'}
+                                    </span>
+                                    <span className="text-[9px] text-slate-500 font-semibold shrink-0">
+                                      {comment.createdAt ? new Date(comment.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Just now'}
+                                    </span>
+                                  </div>
+                                  <p className="text-slate-200 text-xs mt-1 leading-snug whitespace-pre-wrap font-medium">
+                                    {comment.text}
+                                  </p>
+                                </div>
+
+                                {/* Delete comments option */}
+                                {(isOwnComment || isAdmin) && (
+                                  <button
+                                    onClick={() => handleDeleteComment(comment.id)}
+                                    className="text-slate-500 hover:text-red-400 p-1 rounded-lg hover:bg-red-500/10 transition duration-150 shrink-0 opacity-0 group-hover:opacity-100 focus:opacity-100"
+                                    title="Delete Comment"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    /* ABOUT TAB VIEW */
+                    <div className="space-y-4">
+                      <div className="bg-[#120a3a]/50 border border-[#2b1f6d]/40 rounded-2xl p-3 space-y-2 text-xs">
+                        <div className="flex items-center justify-between text-slate-400 font-bold border-b border-[#2b1f6d]/30 pb-2">
+                          <span>• {activePlayingVideo.views + 1} Views</span>
+                          <span>• Uploaded {new Date(activePlayingVideo.uploadedAt).toLocaleDateString()}</span>
+                        </div>
+                        <div className="space-y-1 mt-2 text-slate-300 leading-relaxed font-medium">
+                          <p>
+                            यह प्रीमियम लेसन वीडियो <strong className="text-white">Gautam Tiwari</strong> द्वारा प्रदान किया गया है ताकि आप डिजिटल मार्केटिंग और यूट्यूब ग्रोथ को बिल्कुल फ्री में गहराई से सीख सकें।
+                          </p>
+                          <p className="mt-1">
+                            ऐप के अंदर ही इस वीडियो को लाइक करें, अपने सवाल कमेंट में पूछें और दोस्तों के साथ शेयर करके उनके भी ज्ञान को बढ़ाएं!
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Complete watching & motivation card */}
+                      <div className="bg-[#120e36]/60 border border-[#231758] p-3 rounded-2xl flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-9 h-9 bg-red-600/10 rounded-xl flex items-center justify-center text-red-500 shrink-0">
+                            <Award className="w-5 h-5" />
+                          </div>
+                          <div className="min-w-0">
+                            <h4 className="text-[11px] font-bold text-white leading-none">Practice and Grow!</h4>
+                            <p className="text-[10px] text-slate-400 mt-1 truncate">Learn step-by-step and implement what Gautam Tiwari teaches.</p>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => {
+                            setActivePlayingVideo(null);
+                            setActivePlayerTab('comments');
+                            setShowRateModal(true);
+                          }}
+                          className="bg-red-600 hover:bg-red-700 text-white font-extrabold text-[10px] py-2 px-3 rounded-xl transition shrink-0"
+                        >
+                          Done Watching
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </motion.div>
+
+              {/* --- CUSTOM IN-APP SHARE MODAL POPUP --- */}
+              <AnimatePresence>
+                {showShareModal && (
+                  <div className="absolute inset-0 z-[60] bg-black/85 backdrop-blur-sm flex items-center justify-center p-4">
+                    <motion.div
+                      initial={{ scale: 0.9, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      exit={{ scale: 0.9, opacity: 0 }}
+                      className="bg-[#0f092e] border-2 border-[#37268d] rounded-3xl p-5 w-full max-w-sm space-y-4 shadow-2xl relative"
+                    >
+                      <button
+                        onClick={() => setShowShareModal(false)}
+                        className="absolute right-3.5 top-3.5 w-7 h-7 bg-[#1c124e] rounded-full flex items-center justify-center text-slate-300 hover:text-white transition"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+
+                      <div className="text-center space-y-1">
+                        <h4 className="font-extrabold text-white text-sm">Share Lesson</h4>
+                        <p className="text-[10px] text-slate-400">Share with colleagues and friends. Earn bonus points!</p>
+                      </div>
+
+                      {/* Direct YouTube Link Copy-paste field */}
+                      <div className="bg-[#150d40] border border-[#30207d] rounded-xl p-2 flex items-center justify-between gap-2">
+                        <span className="text-[10px] font-mono text-slate-300 truncate flex-1 select-all">
+                          https://www.youtube.com/watch?v={activePlayingVideo.videoId}
+                        </span>
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(`https://www.youtube.com/watch?v=${activePlayingVideo.videoId}`);
+                            addPoints(15); // Reward 15 points for sharing
+                            alert('Link copied! +15 activity points added.');
+                          }}
+                          className="bg-red-600 hover:bg-red-700 text-white font-extrabold text-[10px] py-1 px-2.5 rounded-lg transition shrink-0 flex items-center gap-1"
+                        >
+                          <Copy className="w-3 h-3" />
+                          <span>Copy</span>
+                        </button>
+                      </div>
+
+                      {/* Social Shortcut Buttons */}
+                      <div className="grid grid-cols-4 gap-2 pt-1">
+                        {[
+                          {
+                            name: 'WhatsApp',
+                            icon: <Share2 className="w-4 h-4 text-emerald-400" />,
+                            action: () => {
+                              const text = encodeURIComponent(`Sikkho App पर यह वीडियो देखो: "${activePlayingVideo.title}" - https://www.youtube.com/watch?v=${activePlayingVideo.videoId}`);
+                              window.open(`https://api.whatsapp.com/send?text=${text}`, '_blank');
+                              addPoints(15);
+                            }
+                          },
+                          {
+                            name: 'Twitter',
+                            icon: <ExternalLink className="w-4 h-4 text-sky-400" />,
+                            action: () => {
+                              const text = encodeURIComponent(`Learning YouTube growth on Sikkho App! Check out: "${activePlayingVideo.title}" - https://www.youtube.com/watch?v=${activePlayingVideo.videoId}`);
+                              window.open(`https://twitter.com/intent/tweet?text=${text}`, '_blank');
+                              addPoints(15);
+                            }
+                          },
+                          {
+                            name: 'Telegram',
+                            icon: <Send className="w-4 h-4 text-blue-400" />,
+                            action: () => {
+                              const text = encodeURIComponent(`Sikkho App: "${activePlayingVideo.title}"`);
+                              const url = encodeURIComponent(`https://www.youtube.com/watch?v=${activePlayingVideo.videoId}`);
+                              window.open(`https://t.me/share/url?url=${url}&text=${text}`, '_blank');
+                              addPoints(15);
+                            }
+                          },
+                          {
+                            name: 'Gmail',
+                            icon: <Mail className="w-4 h-4 text-rose-400" />,
+                            action: () => {
+                              const subject = encodeURIComponent(`Learn with me on Sikkho: ${activePlayingVideo.title}`);
+                              const body = encodeURIComponent(`Hi, check out this great lesson on Sikkho App:\n\n"${activePlayingVideo.title}"\nWatch here: https://www.youtube.com/watch?v=${activePlayingVideo.videoId}`);
+                              window.open(`mailto:?subject=${subject}&body=${body}`, '_blank');
+                              addPoints(15);
+                            }
+                          }
+                        ].map((item) => (
+                          <button
+                            key={item.name}
+                            onClick={() => {
+                              item.action();
+                              setShowShareModal(false);
+                            }}
+                            className="bg-[#1c124e] hover:bg-[#2c1d7c] p-2.5 rounded-2xl flex flex-col items-center gap-1 transition"
+                          >
+                            {item.icon}
+                            <span className="text-[9px] font-bold text-slate-300">{item.name}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </motion.div>
+                  </div>
+                )}
+              </AnimatePresence>
             </div>
           )}
         </AnimatePresence>

@@ -22,6 +22,27 @@ export interface Video {
   category: string;
   uploadedAt: string;
   views: number;
+  likesCount?: number;
+  dislikesCount?: number;
+  sharesCount?: number;
+}
+
+export interface VideoComment {
+  id: string;
+  videoId: string;
+  userId: string;
+  userName: string;
+  userEmail: string;
+  text: string;
+  createdAt: string;
+}
+
+export interface VideoInteraction {
+  id: string;
+  userId: string;
+  videoId: string;
+  type: 'like' | 'dislike' | null;
+  updatedAt: string;
 }
 
 export interface BannerSlide {
