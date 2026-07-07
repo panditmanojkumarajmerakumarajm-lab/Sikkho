@@ -57,9 +57,33 @@ export default function App() {
     const cached = localStorage.getItem('sikkho_dark_mode');
     return cached ? cached === 'true' : false;
   });
-  const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(() => {
+    const cached = localStorage.getItem('sikkho_user');
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached);
+        if (parsed && typeof parsed === 'object' && parsed.uid) {
+          return parsed;
+        }
+      } catch (e) {
+        console.warn('Failed to parse cached user:', e);
+      }
+    }
+    return null;
+  });
   const [isAuthLoading, setIsAuthLoading] = useState(true);
-  const [isAdmin, setIsAdmin] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(() => {
+    const cached = localStorage.getItem('sikkho_user');
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached);
+        if (parsed && parsed.email) {
+          return checkIfAdmin(parsed.email);
+        }
+      } catch (e) {}
+    }
+    return false;
+  });
 
   // Firestore collections states
   const [videos, setVideos] = useState<Video[]>([]);
@@ -92,6 +116,11 @@ export default function App() {
   const [isSubmittingAuth, setIsSubmittingAuth] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
+  // Banner Customization States
+  const [customBannerUrl, setCustomBannerUrl] = useState('');
+  const [isUpdatingBanner, setIsUpdatingBanner] = useState(false);
+  const [bannerUpdateMsg, setBannerUpdateMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
   // Google sign in simulation modal
   const [showGoogleModal, setShowGoogleModal] = useState(false);
   const [googleEmail, setGoogleEmail] = useState('');
@@ -111,12 +140,16 @@ export default function App() {
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [isDownloaded, setIsDownloaded] = useState(false);
   const [activePlayerTab, setActivePlayerTab] = useState<'comments' | 'about'>('comments');
+  const [showCommentsDrawer, setShowCommentsDrawer] = useState(false);
+  const [isSubscribed, setIsSubscribed] = useState(() => {
+    return localStorage.getItem('sikkho_subscribed') === 'true';
+  });
 
   // Initialize and Seed data
   useEffect(() => {
     // Check onboarding cache
     const onboarded = localStorage.getItem('sikkho_onboarded');
-    if (onboarded) {
+    if (onboarded || currentUser) {
       setShowOnboarding(false);
     }
 
@@ -213,6 +246,19 @@ export default function App() {
             setCurrentUser(profile);
             setIsAdmin(checkIfAdmin(profile.email));
           } else {
+            // Check if we have a cached version we can use
+            const cachedUserStr = localStorage.getItem('sikkho_user');
+            if (cachedUserStr) {
+              try {
+                const cached = JSON.parse(cachedUserStr);
+                if (cached && cached.uid === user.uid) {
+                  setCurrentUser(cached);
+                  setIsAdmin(checkIfAdmin(cached.email));
+                  setIsAuthLoading(false);
+                  return;
+                }
+              } catch (e) {}
+            }
             // If Firestore is slow or rule blocked, generate default profile in state
             const mockProfile: UserProfile = {
               uid: user.uid,
@@ -229,7 +275,19 @@ export default function App() {
             setCurrentUser(mockProfile);
           }
         } catch (error) {
-          console.warn('Could not read user profile from Firestore, using mock state:', error);
+          console.warn('Could not read user profile from Firestore, checking cache/mock state:', error);
+          const cachedUserStr = localStorage.getItem('sikkho_user');
+          if (cachedUserStr) {
+            try {
+              const cached = JSON.parse(cachedUserStr);
+              if (cached && cached.uid === user.uid) {
+                setCurrentUser(cached);
+                setIsAdmin(checkIfAdmin(cached.email));
+                setIsAuthLoading(false);
+                return;
+              }
+            } catch (e) {}
+          }
           const mockProfile: UserProfile = {
             uid: user.uid,
             name: user.displayName || 'Learner',
@@ -245,8 +303,21 @@ export default function App() {
           setCurrentUser(mockProfile);
         }
       } else {
-        setCurrentUser(null);
-        setIsAdmin(false);
+        // Only log out if they are not using a direct DB fallback or direct simulation account
+        const cachedUserStr = localStorage.getItem('sikkho_user');
+        let isFallback = false;
+        if (cachedUserStr) {
+          try {
+            const cached = JSON.parse(cachedUserStr);
+            if (cached && (cached.uid.startsWith('db_user_') || cached.uid.startsWith('mock_'))) {
+              isFallback = true;
+            }
+          } catch (e) {}
+        }
+        if (!isFallback) {
+          setCurrentUser(null);
+          setIsAdmin(false);
+        }
       }
       setIsAuthLoading(false);
     });
@@ -288,6 +359,15 @@ export default function App() {
     };
   }, [currentUser]);
 
+  // Synchronize currentUser with localStorage
+  useEffect(() => {
+    if (currentUser) {
+      localStorage.setItem('sikkho_user', JSON.stringify(currentUser));
+    } else {
+      localStorage.removeItem('sikkho_user');
+    }
+  }, [currentUser]);
+
   // Listen for Comments and User Interaction on the active playing video
   useEffect(() => {
     if (!activePlayingVideo) {
@@ -296,9 +376,11 @@ export default function App() {
       setIsDownloaded(false);
       setDownloadProgress(0);
       setIsDownloading(false);
+      setShowCommentsDrawer(false);
       return;
     }
 
+    setShowCommentsDrawer(false);
     const videoId = activePlayingVideo.id;
 
     // Reset download status check - we can save mock offline downloads in localStorage
@@ -849,6 +931,92 @@ export default function App() {
     addPoints(30); // Award points for rating
   };
 
+  // Handle banner photo selection and update
+  const handleUpdateBannerImage = async (imageUrlToSet: string) => {
+    if (!imageUrlToSet.trim()) {
+      setBannerUpdateMsg({ type: 'error', text: 'कृपया एक वैध इमेज यूआरएल दर्ज करें या फोटो अपलोड करें।' });
+      return;
+    }
+    setIsUpdatingBanner(true);
+    setBannerUpdateMsg(null);
+    try {
+      const bannerRef = doc(db, COLLECTIONS.BANNERS, 'current_banner');
+      const newBanner = {
+        id: 'current_banner',
+        imageUrl: imageUrlToSet,
+        title: '',
+        videoUrl: '',
+        createdAt: new Date().toISOString()
+      };
+      await setDoc(bannerRef, newBanner);
+
+      // Clear any other banner entries so it stays as the only displayed banner
+      const querySnap = await getDocs(collection(db, COLLECTIONS.BANNERS));
+      for (const d of querySnap.docs) {
+        if (d.id !== 'current_banner') {
+          await deleteDoc(doc(db, COLLECTIONS.BANNERS, d.id));
+        }
+      }
+
+      setBanners([newBanner as BannerSlide]);
+      setBannerIndex(0);
+      setBannerUpdateMsg({ type: 'success', text: 'बैनर फोटो सफलतापूर्वक बदल दिया गया है! 🎉' });
+      setCustomBannerUrl('');
+    } catch (error) {
+      console.error('Failed to update banner:', error);
+      setBannerUpdateMsg({ type: 'error', text: 'बैनर अपडेट करने में विफल। कृपया फिर से प्रयास करें।' });
+    } finally {
+      setIsUpdatingBanner(false);
+    }
+  };
+
+  const handleResetBanners = async () => {
+    setIsUpdatingBanner(true);
+    setBannerUpdateMsg(null);
+    try {
+      // Clear out the current banner doc
+      await deleteDoc(doc(db, COLLECTIONS.BANNERS, 'current_banner'));
+      
+      // Clear out any other custom banners in the DB
+      const querySnap = await getDocs(collection(db, COLLECTIONS.BANNERS));
+      for (const d of querySnap.docs) {
+        await deleteDoc(doc(db, COLLECTIONS.BANNERS, d.id));
+      }
+      
+      // Let it fall back to the preset banners
+      setBanners(PRESET_BANNERS);
+      setBannerIndex(0);
+      setBannerUpdateMsg({ type: 'success', text: 'डिफ़ॉल्ट बैनर सफलतापूर्वक रिस्टोर कर दिए गए हैं! 🔄' });
+    } catch (error) {
+      console.error('Failed to reset banners:', error);
+      setBannerUpdateMsg({ type: 'error', text: 'बैनर रीसेट करने में विफल।' });
+    } finally {
+      setIsUpdatingBanner(false);
+    }
+  };
+
+  const handleLocalPhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      setBannerUpdateMsg({ type: 'error', text: 'कृपया केवल इमेज फ़ाइल ही चुनें।' });
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      const base64String = event.target?.result as string;
+      if (base64String) {
+        await handleUpdateBannerImage(base64String);
+      }
+    };
+    reader.onerror = () => {
+      setBannerUpdateMsg({ type: 'error', text: 'फ़ाइल पढ़ने में त्रुटि हुई।' });
+    };
+    reader.readAsDataURL(file);
+  };
+
   // Render Overlay Modals
   const renderOverlay = () => {
     switch (activeOverlay) {
@@ -1296,21 +1464,6 @@ export default function App() {
                       className="w-full h-full object-cover transition-all" 
                       alt="Banner slide" 
                     />
-                    <div className="absolute inset-0 bg-gradient-to-t from-slate-950/75 via-transparent to-transparent flex flex-col justify-end p-3">
-                      {banners[bannerIndex]?.title && (
-                        <h3 className="text-xs font-bold text-white leading-tight">
-                          {banners[bannerIndex]?.title}
-                        </h3>
-                      )}
-                      {banners[bannerIndex]?.videoUrl && (
-                        <button 
-                          onClick={() => handlePlayBannerVideo(banners[bannerIndex].videoUrl!)}
-                          className="text-[10px] text-red-400 font-extrabold hover:underline mt-1 flex items-center gap-0.5 text-left"
-                        >
-                          Discover Video <ArrowUpRight className="w-3 h-3" />
-                        </button>
-                      )}
-                    </div>
 
                     {/* Banner Control Arrows */}
                     <div className="absolute top-1/2 -translate-y-1/2 left-2 right-2 flex justify-between opacity-0 group-hover:opacity-100 transition-opacity">
@@ -1509,6 +1662,146 @@ export default function App() {
                     </div>
                   )}
 
+                  {/* HOME BANNER CUSTOMIZER CARD */}
+                  {isAdmin && (
+                    <div className="bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-3xl p-4 shadow-sm space-y-4 text-left">
+                      <div className="flex items-center justify-between">
+                        <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                          <Sparkles className="w-4 h-4 text-amber-500 animate-pulse" /> होम बैनर फोटो कस्टमाइज़र
+                        </h4>
+                        {banners.length > 0 && (
+                          <span className="text-[9px] bg-slate-100 dark:bg-slate-800 text-slate-500 font-bold px-2 py-0.5 rounded-full">
+                            Live Slide
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Current Banner Preview */}
+                      {banners.length > 0 && (
+                        <div className="relative aspect-video rounded-2xl overflow-hidden border border-slate-100 dark:border-slate-800/80 bg-slate-950 shadow-inner group">
+                          <img 
+                            src={banners[bannerIndex]?.imageUrl} 
+                            className="w-full h-full object-cover" 
+                            alt="Current Banner Preview" 
+                          />
+                          <div className="absolute inset-0 bg-black/45 flex items-center justify-center opacity-0 group-hover:opacity-100 transition duration-150">
+                            <span className="text-[10px] text-white font-extrabold bg-black/60 px-2.5 py-1 rounded-full backdrop-blur-sm">
+                              Current Active Banner
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Banner feedback notification */}
+                      {bannerUpdateMsg && (
+                        <div className={`p-2.5 rounded-xl text-xs font-bold ${
+                          bannerUpdateMsg.type === 'success' 
+                            ? 'bg-emerald-50 dark:bg-emerald-950/25 text-emerald-600 dark:text-emerald-400 border border-emerald-100 dark:border-emerald-900/30' 
+                            : 'bg-red-50 dark:bg-red-950/25 text-red-600 dark:text-red-400 border border-red-100 dark:border-red-900/30'
+                        }`}>
+                          {bannerUpdateMsg.text}
+                        </div>
+                      )}
+
+                      {/* Controls Grid */}
+                      <div className="space-y-3.5">
+                        {/* Local File Upload Section */}
+                        <div>
+                          <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wide mb-1.5">
+                            1. मोबाइल / कंप्यूटर से कोई भी फोटो लगाएं:
+                          </label>
+                          <div className="relative">
+                            <input 
+                              type="file" 
+                              accept="image/*" 
+                              onChange={handleLocalPhotoUpload} 
+                              disabled={isUpdatingBanner}
+                              className="hidden" 
+                              id="banner-file-input" 
+                            />
+                            <label 
+                              htmlFor="banner-file-input" 
+                              className={`w-full py-3 px-4 bg-red-600 hover:bg-red-700 text-white font-extrabold rounded-2xl flex items-center justify-center gap-2 text-xs shadow-md transition cursor-pointer ${
+                                isUpdatingBanner ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'
+                              }`}
+                            >
+                              {isUpdatingBanner ? (
+                                <RefreshCw className="w-4 h-4 animate-spin" />
+                              ) : (
+                                <Plus className="w-4 h-4" />
+                              )}
+                              <span>डिवाइस से कोई भी फोटो चुनें (Upload Photo)</span>
+                            </label>
+                          </div>
+                        </div>
+
+                        {/* Image URL Input Section */}
+                        <div>
+                          <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wide mb-1.5">
+                            2. या कोई भी इमेज URL पेस्ट करें:
+                          </label>
+                          <div className="flex gap-2">
+                            <input 
+                              type="text" 
+                              placeholder="https://example.com/banner.jpg" 
+                              value={customBannerUrl} 
+                              onChange={(e) => setCustomBannerUrl(e.target.value)}
+                              disabled={isUpdatingBanner}
+                              className="flex-1 bg-slate-50 dark:bg-slate-850 border border-slate-100 dark:border-slate-800 rounded-2xl px-3 py-2 text-xs text-slate-800 dark:text-white placeholder-slate-400 focus:outline-none focus:border-red-500"
+                            />
+                            <button 
+                              onClick={() => handleUpdateBannerImage(customBannerUrl)}
+                              disabled={isUpdatingBanner || !customBannerUrl.trim()}
+                              className="px-4 py-2 bg-slate-900 hover:bg-slate-800 dark:bg-slate-800 dark:hover:bg-slate-700 text-white disabled:opacity-55 font-extrabold rounded-2xl text-xs transition shrink-0 active:scale-95"
+                            >
+                              अपडेट करें
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Curated Presets Selection */}
+                        <div>
+                          <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wide mb-1.5">
+                            3. हमारे बेहतरीन डिज़ाइन बैकग्राउंड्स चुनें:
+                          </label>
+                          <div className="grid grid-cols-4 gap-2">
+                            {[
+                              { name: 'Cosmic Tech', url: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&auto=format&fit=crop&q=80' },
+                              { name: 'Dark Code', url: 'https://images.unsplash.com/photo-1607799279861-4dd421887fb3?w=800&auto=format&fit=crop&q=80' },
+                              { name: 'Neon Purple', url: 'https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=800&auto=format&fit=crop&q=80' },
+                              { name: 'Abstract Art', url: 'https://images.unsplash.com/photo-1541701494587-cb58502866ab?w=800&auto=format&fit=crop&q=80' }
+                            ].map((preset, idx) => (
+                              <button
+                                key={idx}
+                                onClick={() => handleUpdateBannerImage(preset.url)}
+                                disabled={isUpdatingBanner}
+                                className="relative aspect-video rounded-xl overflow-hidden border border-slate-200 dark:border-slate-800 hover:border-red-500 transition active:scale-95 group text-left"
+                              >
+                                <img src={preset.url} className="w-full h-full object-cover" alt={preset.name} />
+                                <div className="absolute inset-0 bg-black/40 flex items-end p-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                  <span className="text-[8px] text-white font-bold leading-none">{preset.name}</span>
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Reset to Default Options */}
+                        <div className="pt-2 border-t border-slate-50 dark:border-slate-850 flex justify-end">
+                          <button
+                            onClick={handleResetBanners}
+                            disabled={isUpdatingBanner}
+                            className="text-[10px] text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 font-extrabold flex items-center gap-1 transition"
+                          >
+                            <RefreshCw className="w-3 h-3" />
+                            <span>डिफ़ॉल्ट बैनर रिस्टोर करें (Restore Default)</span>
+                          </button>
+                        </div>
+
+                      </div>
+                    </div>
+                  )}
+
                   {/* Menu Items */}
                   <div className="bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-3xl p-2 shadow-sm space-y-0.5 divide-y divide-slate-50 dark:divide-slate-850/60">
                     {[
@@ -1609,185 +1902,608 @@ export default function App() {
         {/* -------------------- EMBEDDED VIDEO PLAYER OVERLAY -------------------- */}
         <AnimatePresence>
           {activePlayingVideo && (
-            <div className="absolute inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-2 sm:p-4 overflow-y-auto select-none">
-              <motion.div
-                initial={{ scale: 0.95, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                exit={{ scale: 0.95, opacity: 0 }}
-                className="bg-[#0b0724] border border-[#2b1f6d] w-full max-w-2xl rounded-3xl overflow-hidden shadow-2xl flex flex-col my-auto max-h-[95vh]"
-              >
-                {/* Modal Header */}
-                <div className="p-3.5 bg-[#120e36] border-b border-[#2b1f6d] flex items-center justify-between shrink-0">
-                  <div className="flex-1 mr-4 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="text-[9px] uppercase font-black text-red-400 bg-red-950/50 border border-red-900/30 px-2 py-0.5 rounded-full">
-                        {activePlayingVideo.category}
+            activePlayingVideo.category === 'Short Video' ? (
+              <div className="fixed inset-0 z-50 bg-black text-white flex items-center justify-center overflow-hidden select-none">
+                {/* Back/Close button for Shorts */}
+                <button
+                  onClick={() => {
+                    setActivePlayingVideo(null);
+                    setShowCommentsDrawer(false);
+                  }}
+                  className="absolute top-4 left-4 z-40 w-10 h-10 rounded-full bg-black/50 hover:bg-black/80 text-white flex items-center justify-center transition active:scale-95 shadow-md backdrop-blur-md"
+                  title="Back to Home"
+                >
+                  <ChevronLeft className="w-6 h-6 text-white" />
+                </button>
+
+                {/* Centered Vertical 9:16 Frame Container */}
+                <div className="relative w-full max-w-[420px] h-full sm:h-[94vh] sm:rounded-3xl overflow-hidden bg-zinc-950 flex flex-col justify-between shadow-2xl border border-zinc-905">
+                  
+                  {/* 1. Immersive YouTube Video Iframe */}
+                  <div className="absolute inset-0 w-full h-full z-0">
+                    <iframe
+                      src={`https://www.youtube.com/embed/${activePlayingVideo.videoId}?autoplay=1&mute=0&rel=0&modestbranding=1&loop=1&playlist=${activePlayingVideo.videoId}`}
+                      title={activePlayingVideo.title}
+                      className="w-full h-full border-0 scale-[1.01] pointer-events-auto"
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                      allowFullScreen
+                    ></iframe>
+                  </div>
+
+                  {/* Gradient shade overlays */}
+                  <div className="absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-black/60 to-transparent pointer-events-none z-10" />
+                  <div className="absolute inset-x-0 bottom-0 h-44 bg-gradient-to-t from-black/80 via-black/40 to-transparent pointer-events-none z-10" />
+
+                  {/* 2. Floating Action Controls overlay (Right Side) */}
+                  <div className="absolute right-3.5 bottom-24 z-20 flex flex-col items-center gap-4 text-center select-none pointer-events-auto">
+                    
+                    {/* Channels icon with plus/subscribe */}
+                    <div className="relative mb-1">
+                      <div className="w-11 h-11 bg-red-600 rounded-full flex items-center justify-center text-white text-sm font-black border-2 border-white shadow-lg">
+                        S
+                      </div>
+                      {!isSubscribed && (
+                        <button
+                          onClick={() => {
+                            setIsSubscribed(true);
+                            localStorage.setItem('sikkho_subscribed', 'true');
+                            addPoints(20);
+                            alert('Sikkho App Subscribed! +20 Learning Points 🎉');
+                          }}
+                          className="absolute -bottom-1 left-1/2 -translate-x-1/2 bg-red-600 hover:bg-red-700 text-white rounded-full p-0.5 shadow-md active:scale-95 transition"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Likes button */}
+                    <div className="flex flex-col items-center">
+                      <button
+                        onClick={() => handleToggleLikeDislike('like')}
+                        className={`w-11 h-11 rounded-full flex items-center justify-center transition shadow-md active:scale-90 ${
+                          activeVideoInteraction?.type === 'like'
+                            ? 'bg-red-600 text-white'
+                            : 'bg-black/55 hover:bg-black/75 text-white backdrop-blur-md'
+                        }`}
+                      >
+                        <ThumbsUp className={`w-5 h-5 ${activeVideoInteraction?.type === 'like' ? 'fill-current' : ''}`} />
+                      </button>
+                      <span className="text-[10px] font-extrabold mt-1 text-slate-200 drop-shadow">{activePlayingVideo.likesCount || 0}</span>
+                    </div>
+
+                    {/* Comments button */}
+                    <div className="flex flex-col items-center">
+                      <button
+                        onClick={() => setShowCommentsDrawer(true)}
+                        className="w-11 h-11 rounded-full bg-black/55 hover:bg-black/75 text-white flex items-center justify-center transition shadow-md active:scale-90 backdrop-blur-md"
+                      >
+                        <MessageCircle className="w-5 h-5" />
+                      </button>
+                      <span className="text-[10px] font-extrabold mt-1 text-slate-200 drop-shadow">{activeVideoComments.length}</span>
+                    </div>
+
+                    {/* Save/Favorite button */}
+                    <div className="flex flex-col items-center">
+                      <button
+                        onClick={() => handleToggleFavorite(activePlayingVideo.id)}
+                        className={`w-11 h-11 rounded-full flex items-center justify-center transition shadow-md active:scale-90 ${
+                          favorites.includes(activePlayingVideo.id)
+                            ? 'bg-red-600 text-white'
+                            : 'bg-black/55 hover:bg-black/75 text-white backdrop-blur-md'
+                        }`}
+                      >
+                        <Heart className={`w-5 h-5 ${favorites.includes(activePlayingVideo.id) ? 'fill-current text-white' : ''}`} />
+                      </button>
+                      <span className="text-[10px] font-extrabold mt-1 text-slate-200 drop-shadow">
+                        {favorites.includes(activePlayingVideo.id) ? 'Saved' : 'Save'}
                       </span>
                     </div>
-                    <h3 className="font-extrabold text-white text-xs sm:text-sm truncate mt-1">
+
+                    {/* Share button */}
+                    <div className="flex flex-col items-center">
+                      <button
+                        onClick={() => setShowShareModal(true)}
+                        className="w-11 h-11 rounded-full bg-black/55 hover:bg-black/75 text-white flex items-center justify-center transition shadow-md active:scale-90 backdrop-blur-md"
+                      >
+                        <Share2 className="w-5 h-5" />
+                      </button>
+                      <span className="text-[10px] font-extrabold mt-1 text-slate-200 drop-shadow">Share</span>
+                    </div>
+
+                  </div>
+
+                  {/* 3. Bottom text overlay */}
+                  <div className="absolute left-4 bottom-5 right-18 z-20 text-left select-none pointer-events-none">
+                    <div className="flex items-center gap-2 mb-2 pointer-events-auto">
+                      <span className="text-xs font-black text-white drop-shadow">@SikkhoApp</span>
+                      <span className="bg-red-600 text-white text-[8px] font-black px-1.5 py-0.5 rounded-md uppercase tracking-wider drop-shadow">
+                        Instructor
+                      </span>
+                    </div>
+
+                    <h3 className="font-extrabold text-white text-xs sm:text-sm leading-snug tracking-wide drop-shadow-lg pr-4 mb-2">
                       {activePlayingVideo.title}
                     </h3>
+
+                    <div className="inline-flex items-center gap-1.5 bg-black/40 backdrop-blur-sm px-2 py-1 rounded-lg border border-white/10 text-[9px] font-bold text-red-400">
+                      <Sparkles className="w-3 h-3 text-red-500 animate-spin" />
+                      <span>{activePlayingVideo.category}</span>
+                    </div>
                   </div>
+
+                  {/* Navigation through shorts (Next / Prev) */}
+                  <div className="absolute top-1/2 -translate-y-1/2 left-3 right-3 z-30 flex justify-between opacity-0 hover:opacity-100 transition-opacity duration-200 pointer-events-none">
+                    <button
+                      disabled={videos.filter(v => v.category === 'Short Video').findIndex(v => v.id === activePlayingVideo.id) === 0}
+                      onClick={() => {
+                        const shortsList = videos.filter(v => v.category === 'Short Video');
+                        const currIdx = shortsList.findIndex(v => v.id === activePlayingVideo.id);
+                        if (currIdx > 0) {
+                          setActivePlayingVideo(shortsList[currIdx - 1]);
+                        }
+                      }}
+                      className="w-8 h-8 rounded-full bg-black/65 text-white flex items-center justify-center disabled:opacity-30 pointer-events-auto active:scale-95 transition"
+                    >
+                      <ChevronLeft className="w-5 h-5" />
+                    </button>
+                    <button
+                      disabled={videos.filter(v => v.category === 'Short Video').findIndex(v => v.id === activePlayingVideo.id) === videos.filter(v => v.category === 'Short Video').length - 1}
+                      onClick={() => {
+                        const shortsList = videos.filter(v => v.category === 'Short Video');
+                        const currIdx = shortsList.findIndex(v => v.id === activePlayingVideo.id);
+                        if (currIdx !== -1 && currIdx < shortsList.length - 1) {
+                          setActivePlayingVideo(shortsList[currIdx + 1]);
+                        }
+                      }}
+                      className="w-8 h-8 rounded-full bg-black/65 text-white flex items-center justify-center disabled:opacity-30 pointer-events-auto active:scale-95 transition"
+                    >
+                      <ChevronRight className="w-5 h-5" />
+                    </button>
+                  </div>
+
+                </div>
+
+                {/* Comments Drawer Popup inside Shorts */}
+                {showCommentsDrawer && (
+                  <div className="absolute inset-y-0 right-0 w-full max-w-[400px] z-50 bg-[#0f0f0f] border-l border-slate-900 shadow-2xl flex flex-col">
+                    <div className="p-4 border-b border-slate-900 flex items-center justify-between">
+                      <span className="font-extrabold text-white text-sm">Comments ({activeVideoComments.length})</span>
+                      <button onClick={() => setShowCommentsDrawer(false)} className="p-2 rounded-full hover:bg-slate-900 text-slate-400">
+                        <X className="w-5 h-5" />
+                      </button>
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                      {activeVideoComments.length === 0 ? (
+                        <div className="text-center py-12 text-xs text-slate-500">पहला कमेंट आप करें! 📝</div>
+                      ) : (
+                        activeVideoComments.map(comment => (
+                          <div key={comment.id} className="flex gap-2.5 items-start text-left">
+                            <div className="w-7 h-7 bg-red-600 rounded-full flex items-center justify-center font-bold text-white text-xs shrink-0">
+                              {comment.userName ? comment.userName[0].toUpperCase() : 'U'}
+                            </div>
+                            <div className="flex-1 bg-zinc-900 rounded-2xl p-2.5">
+                              <div className="flex justify-between items-center mb-1">
+                                <span className="text-[10px] text-slate-300 font-extrabold">{comment.userName}</span>
+                                <span className="text-[8px] text-slate-500">{new Date(comment.createdAt).toLocaleDateString()}</span>
+                              </div>
+                              <p className="text-xs text-slate-200 leading-relaxed">{comment.text}</p>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+
+                    <div className="p-3 border-t border-slate-900 bg-black/50">
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          placeholder="Add a comment..."
+                          value={newCommentText}
+                          onChange={(e) => setNewCommentText(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') handleAddComment();
+                          }}
+                          className="flex-1 bg-zinc-900 border border-zinc-800 rounded-full px-4 py-2 text-xs text-white placeholder-zinc-500 focus:outline-none"
+                        />
+                        <button
+                          onClick={handleAddComment}
+                          className="p-2 bg-red-600 hover:bg-red-700 rounded-full text-white transition active:scale-95 shrink-0"
+                        >
+                          <Send className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* custom share modal for shorts */}
+                {showShareModal && (
+                  <div className="absolute inset-0 z-[60] bg-black/85 backdrop-blur-sm flex items-center justify-center p-4">
+                    <div className="bg-[#181818] border border-slate-800 rounded-3xl p-5 w-full max-w-sm space-y-4 shadow-2xl relative text-left">
+                      <button
+                        onClick={() => setShowShareModal(false)}
+                        className="absolute right-3.5 top-3.5 w-7 h-7 bg-[#272727] rounded-full flex items-center justify-center text-slate-300 hover:text-white transition"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+
+                      <div className="space-y-1">
+                        <h4 className="font-extrabold text-white text-sm">Share Sikkho Shorts</h4>
+                        <p className="text-[10px] text-slate-400">Share with colleagues and friends. Earn bonus points!</p>
+                      </div>
+
+                      <div className="bg-[#272727] border border-slate-800 rounded-xl p-2.5 flex items-center justify-between gap-2">
+                        <span className="text-[10px] font-mono text-slate-300 truncate flex-1 select-all">
+                          https://www.youtube.com/watch?v={activePlayingVideo.videoId}
+                        </span>
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(`https://www.youtube.com/watch?v=${activePlayingVideo.videoId}`);
+                            addPoints(15);
+                            alert('Link copied! +15 activity points added.');
+                          }}
+                          className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white font-extrabold rounded-lg text-[10px] transition shrink-0"
+                        >
+                          Copy
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+              </div>
+            ) : (
+              <div className="fixed inset-0 z-50 bg-[#0f0f0f] text-white flex flex-col overflow-hidden select-none">
+              
+              {/* STICKY VIDEO PLAYER AT THE TOP */}
+              <div className="w-full bg-black shrink-0 aspect-video relative shadow-xl z-10 border-b border-slate-900">
+                {/* Floating Back/Close button */}
+                <button
+                  onClick={() => {
+                    setActivePlayingVideo(null);
+                    setShowCommentsDrawer(false);
+                  }}
+                  className="absolute top-3 left-3 z-20 w-9 h-9 rounded-full bg-black/60 hover:bg-black/90 text-white flex items-center justify-center transition shadow-lg backdrop-blur-sm group"
+                  title="Close Player"
+                >
+                  <ChevronLeft className="w-5 h-5 text-red-500 group-hover:scale-110 transition" />
+                </button>
+                
+                <iframe
+                  src={`https://www.youtube.com/embed/${activePlayingVideo.videoId}?autoplay=1&rel=0&modestbranding=1`}
+                  title={activePlayingVideo.title}
+                  className="absolute inset-0 w-full h-full border-0"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                  allowFullScreen
+                ></iframe>
+              </div>
+
+              {/* SCROLLABLE VIDEO DETAILS & RECOMMENDED FEED */}
+              <div 
+                id="video-detail-scroll-container" 
+                className="flex-1 overflow-y-auto bg-[#0f0f0f] flex flex-col pb-24 scrollbar-none"
+              >
+                {/* 1. Video Header: Title & Meta tags */}
+                <div className="px-4 pt-4 pb-2.5">
+                  <h3 className="font-extrabold text-white text-base sm:text-lg leading-snug tracking-tight">
+                    {activePlayingVideo.title}
+                  </h3>
+                  <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 mt-2 text-xs text-slate-400 font-semibold">
+                    <span>{activePlayingVideo.views + 1} Views</span>
+                    <span>•</span>
+                    <span>{new Date(activePlayingVideo.uploadedAt).toLocaleDateString()}</span>
+                    <span>•</span>
+                    <span className="text-[9px] uppercase font-black text-red-400 bg-red-950/40 border border-red-900/30 px-2 py-0.5 rounded-full inline-block">
+                      {activePlayingVideo.category}
+                    </span>
+                  </div>
+                </div>
+
+                {/* 2. Channel/Instructor Bar */}
+                <div className="px-4 py-3 border-t border-b border-slate-900 flex items-center justify-between gap-3 bg-[#161616]/40">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="w-9 h-9 rounded-full bg-red-600 flex items-center justify-center text-white text-xs font-black shadow-lg shrink-0 border border-red-500/30">
+                      S
+                    </div>
+                    <div className="min-w-0">
+                      <h4 className="font-extrabold text-white text-xs truncate flex items-center gap-1.5">
+                        Sikkho App 
+                        <span className="w-1.5 h-1.5 bg-red-500 rounded-full animate-ping" />
+                      </h4>
+                      <p className="text-[10px] text-slate-400 font-semibold">Gautam Tiwari • 12K Students</p>
+                    </div>
+                  </div>
+
                   <button
                     onClick={() => {
-                      setActivePlayingVideo(null);
-                      setActivePlayerTab('comments');
+                      const nextState = !isSubscribed;
+                      setIsSubscribed(nextState);
+                      localStorage.setItem('sikkho_subscribed', String(nextState));
+                      if (nextState) {
+                        addPoints(20);
+                        alert('Subscribed to Sikkho App! +20 Learning Points added 🚀');
+                      }
                     }}
-                    className="w-8 h-8 rounded-full bg-[#231758] hover:bg-red-600/30 text-slate-300 hover:text-red-400 flex items-center justify-center transition-colors shrink-0"
+                    className={`px-4 py-2 rounded-full text-xs font-black transition duration-150 active:scale-95 flex items-center gap-1 shrink-0 ${
+                      isSubscribed 
+                        ? 'bg-[#272727] text-slate-300 border border-slate-800'
+                        : 'bg-white text-black hover:bg-slate-200 shadow-md'
+                    }`}
                   >
-                    <X className="w-4 h-4" />
+                    <Bell className={`w-3.5 h-3.5 ${isSubscribed ? 'fill-current text-amber-500' : ''}`} />
+                    <span>{isSubscribed ? 'Subscribed' : 'Subscribe'}</span>
                   </button>
                 </div>
 
-                {/* IFrame Video Body */}
-                <div className="relative aspect-video w-full bg-black shrink-0 shadow-lg">
-                  <iframe
-                    src={`https://www.youtube.com/embed/${activePlayingVideo.videoId}?autoplay=1&rel=0&modestbranding=1`}
-                    title={activePlayingVideo.title}
-                    className="absolute inset-0 w-full h-full border-0"
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                    allowFullScreen
-                  ></iframe>
-                </div>
-
-                {/* --- YOUTUBE PREMIUM ACTION BAR --- */}
-                <div className="bg-[#09051e] border-b border-[#2b1f6d]/60 px-4 py-3 flex items-center justify-between gap-2 overflow-x-auto scrollbar-none shrink-0">
-                  {/* Likes/Dislikes Capsule */}
-                  <div className="bg-[#1b1248]/80 rounded-full flex items-center p-0.5 border border-[#2b1f6d]/40 select-none shrink-0">
+                {/* 3. Action Pill Horizontal Scroll bar */}
+                <div className="px-4 py-3.5 flex items-center gap-2 overflow-x-auto scrollbar-none select-none border-b border-slate-900 shrink-0">
+                  {/* Likes/Dislikes capsule */}
+                  <div className="bg-[#272727] rounded-full flex items-center p-0.5 border border-slate-800 select-none shrink-0">
                     <button
                       onClick={() => handleToggleLikeDislike('like')}
-                      className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-[11px] font-bold transition-all active:scale-95 ${
+                      className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-extrabold transition duration-150 active:scale-95 ${
                         activeVideoInteraction?.type === 'like'
                           ? 'bg-red-600 text-white shadow-md'
-                          : 'text-slate-300 hover:bg-[#281b6c]'
+                          : 'text-slate-300 hover:bg-[#323232]'
                       }`}
                     >
                       <ThumbsUp className={`w-3.5 h-3.5 ${activeVideoInteraction?.type === 'like' ? 'fill-current' : ''}`} />
                       <span>{activePlayingVideo.likesCount || 0}</span>
                     </button>
-                    <div className="w-[1px] h-4 bg-[#2b1f6d] my-auto" />
+                    <div className="w-[1px] h-4 bg-slate-700 my-auto" />
                     <button
                       onClick={() => handleToggleLikeDislike('dislike')}
-                      className={`flex items-center justify-center p-1.5 rounded-full transition-all active:scale-95 ${
+                      className={`flex items-center justify-center p-2 rounded-full transition duration-150 active:scale-95 ${
                         activeVideoInteraction?.type === 'dislike'
                           ? 'bg-slate-700 text-white'
-                          : 'text-slate-400 hover:bg-[#281b6c]'
+                          : 'text-slate-400 hover:bg-[#323232]'
                       }`}
                     >
                       <ThumbsDown className={`w-3.5 h-3.5 ${activeVideoInteraction?.type === 'dislike' ? 'fill-current' : ''}`} />
                     </button>
                   </div>
 
-                  {/* Operational Controls group */}
-                  <div className="flex items-center gap-2 shrink-0">
-                    {/* Share capsule */}
-                    <button
-                      onClick={() => setShowShareModal(true)}
-                      className="bg-[#1b1248]/80 hover:bg-[#281b6c] text-slate-300 border border-[#2b1f6d]/40 px-3.5 py-2 rounded-full text-[11px] font-bold flex items-center gap-1.5 transition-all active:scale-95"
-                    >
-                      <Share2 className="w-3.5 h-3.5 text-red-400" />
-                      <span>Share</span>
-                    </button>
+                  {/* Share pill */}
+                  <button
+                    onClick={() => setShowShareModal(true)}
+                    className="bg-[#272727] hover:bg-[#323232] text-slate-200 border border-slate-800 px-4 py-2 rounded-full text-xs font-black flex items-center gap-1.5 transition duration-150 active:scale-95 shrink-0"
+                  >
+                    <Share2 className="w-3.5 h-3.5 text-red-500" />
+                    <span>Share</span>
+                  </button>
 
-                    {/* Download capsule */}
-                    <button
-                      onClick={handleMockDownload}
-                      disabled={isDownloading}
-                      className={`px-3.5 py-2 rounded-full text-[11px] font-bold flex items-center gap-1.5 transition-all active:scale-95 border ${
-                        isDownloaded
-                          ? 'bg-emerald-600/10 text-emerald-400 border-emerald-500/20'
-                          : isDownloading
-                          ? 'bg-amber-600/10 text-amber-400 border-amber-500/20 cursor-not-allowed'
-                          : 'bg-[#1b1248]/80 hover:bg-[#281b6c] text-slate-300 border-[#2b1f6d]/40'
-                      }`}
-                    >
-                      <Download className={`w-3.5 h-3.5 ${isDownloading ? 'animate-bounce' : ''}`} />
-                      <span>
-                        {isDownloaded ? 'Downloaded' : isDownloading ? `Downloading ${downloadProgress}%` : 'Offline Save'}
+                  {/* Offline Save pill */}
+                  <button
+                    onClick={handleMockDownload}
+                    disabled={isDownloading}
+                    className={`px-4 py-2 rounded-full text-xs font-black flex items-center gap-1.5 transition duration-150 active:scale-95 border shrink-0 ${
+                      isDownloaded
+                        ? 'bg-emerald-950/40 text-emerald-400 border-emerald-900/30'
+                        : isDownloading
+                        ? 'bg-amber-950/40 text-amber-400 border-amber-900/30 cursor-not-allowed'
+                        : 'bg-[#272727] hover:bg-[#323232] text-slate-200 border-slate-800'
+                    }`}
+                  >
+                    <Download className={`w-3.5 h-3.5 ${isDownloading ? 'animate-bounce' : ''}`} />
+                    <span>
+                      {isDownloaded ? 'Downloaded' : isDownloading ? `Saving ${downloadProgress}%` : 'Offline Save'}
+                    </span>
+                  </button>
+
+                  {/* Save/Favorite pill */}
+                  <button
+                    onClick={() => handleToggleFavorite(activePlayingVideo.id)}
+                    className={`px-4 py-2 rounded-full text-xs font-black flex items-center gap-1.5 transition duration-150 active:scale-95 border shrink-0 ${
+                      favorites.includes(activePlayingVideo.id)
+                        ? 'bg-red-950/40 text-red-400 border-red-900/30'
+                        : 'bg-[#272727] hover:bg-[#323232] text-slate-200 border-slate-800'
+                    }`}
+                  >
+                    <Heart className={`w-3.5 h-3.5 ${favorites.includes(activePlayingVideo.id) ? 'fill-current text-red-500' : ''}`} />
+                    <span>{favorites.includes(activePlayingVideo.id) ? 'Saved' : 'Save'}</span>
+                  </button>
+                </div>
+
+                {/* 4. Lesson Description summary */}
+                <div className="mx-4 mt-3 bg-[#161616]/30 border border-slate-900 rounded-xl p-3 text-xs leading-relaxed">
+                  <p className="text-slate-300 font-medium">
+                    यह प्रीमियम लेसन वीडियो <strong className="text-white">Gautam Tiwari</strong> द्वारा प्रदान किया गया है ताकि आप डिजिटल मार्केटिंग और यूट्यूब ग्रोथ को बिल्कुल फ्री में सीख सकें।
+                  </p>
+                </div>
+
+                {/* 5. Custom Comments Rounded Widget Box - EXACT MATCH WITH SCREENSHOT */}
+                <div 
+                  onClick={() => setShowCommentsDrawer(true)}
+                  className="bg-[#212121]/70 hover:bg-[#2c2c2c]/90 mx-4 mt-3.5 p-3.5 rounded-2xl border border-slate-900 cursor-pointer transition duration-150 select-none group"
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-black text-white">Comments</span>
+                      <span className="text-[10px] font-black text-slate-300 bg-slate-850 px-2.5 py-0.5 rounded-full">
+                        {activeVideoComments.length}
                       </span>
-                    </button>
+                    </div>
+                    <span className="text-[10px] text-red-400 font-black group-hover:underline">View All</span>
+                  </div>
 
-                    {/* Bookmark/Favorite capsule */}
-                    <button
-                      onClick={() => handleToggleFavorite(activePlayingVideo.id)}
-                      className={`px-3.5 py-2 rounded-full text-[11px] font-bold flex items-center gap-1.5 transition-all active:scale-95 border ${
-                        favorites.includes(activePlayingVideo.id)
-                          ? 'bg-red-500/15 text-red-400 border-red-500/30'
-                          : 'bg-[#1b1248]/80 hover:bg-[#281b6c] text-slate-300 border-[#2b1f6d]/40'
-                      }`}
-                    >
-                      <Heart className={`w-3.5 h-3.5 ${favorites.includes(activePlayingVideo.id) ? 'fill-current text-red-500' : ''}`} />
-                      <span>{favorites.includes(activePlayingVideo.id) ? 'Saved' : 'Save'}</span>
-                    </button>
+                  <div className="mt-2.5 flex items-start gap-2.5">
+                    {activeVideoComments.length > 0 ? (
+                      <>
+                        <div className="w-6 h-6 rounded-full bg-purple-700/80 text-white flex items-center justify-center text-[9px] font-black uppercase shrink-0">
+                          {activeVideoComments[0].userName ? activeVideoComments[0].userName[0] : 'U'}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-[11px] text-slate-200 line-clamp-1 leading-snug font-medium">
+                            <strong className="text-white font-extrabold mr-1">{activeVideoComments[0].userName}:</strong>
+                            {activeVideoComments[0].text}
+                          </p>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="w-6 h-6 rounded-full bg-slate-800 flex items-center justify-center text-slate-400 text-[10px] shrink-0">
+                          🤔
+                        </div>
+                        <p className="text-[11px] text-slate-400 font-medium">
+                          Reminds me of... Add your thoughts here
+                        </p>
+                      </>
+                    )}
                   </div>
                 </div>
 
-                {/* --- NAVIGATION TABS WITHIN THE PLAYER CARD --- */}
-                <div className="bg-[#110c32] px-4 flex border-b border-[#2b1f6d]/40 shrink-0">
-                  <button
-                    onClick={() => setActivePlayerTab('comments')}
-                    className={`py-2 px-4 text-xs font-black uppercase tracking-wider relative transition-colors ${
-                      activePlayerTab === 'comments' ? 'text-red-400' : 'text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    Comments ({activeVideoComments.length})
-                    {activePlayerTab === 'comments' && (
-                      <motion.div layoutId="tabLine" className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-500" />
+                {/* 6. SUGGESTED VIDEOS / UP NEXT SECTION */}
+                <div className="mt-6 px-4">
+                  <div className="flex items-center justify-between mb-4">
+                    <h4 className="font-extrabold text-white text-sm flex items-center gap-2">
+                      <span>Suggested Videos</span>
+                      <span className="text-[9px] font-bold text-red-400 bg-red-950/40 border border-red-900/30 px-2 py-0.5 rounded-full">
+                        Sujhavit Lessons
+                      </span>
+                    </h4>
+                    <span className="text-[10px] text-slate-400 font-semibold">From Sikkho App</span>
+                  </div>
+
+                  {/* Vertically scrolling suggested video stack */}
+                  <div className="space-y-3.5">
+                    {videos.filter(v => v.id !== activePlayingVideo.id).length === 0 ? (
+                      <div className="text-center py-8 text-slate-500 border border-dashed border-slate-800/80 rounded-2xl">
+                        <p className="text-xs font-semibold">No other suggested videos yet.</p>
+                      </div>
+                    ) : (
+                      videos
+                        .filter(v => v.id !== activePlayingVideo.id)
+                        .map((video) => (
+                          <div 
+                            key={video.id}
+                            onClick={() => {
+                              setActivePlayingVideo(video);
+                              const scrollContainer = document.getElementById('video-detail-scroll-container');
+                              if (scrollContainer) {
+                                scrollContainer.scrollTo({ top: 0, behavior: 'smooth' });
+                              }
+                            }}
+                            className="flex gap-3 bg-[#161616]/40 hover:bg-[#1a1a1a] p-2.5 rounded-2xl border border-slate-900/40 transition duration-200 cursor-pointer group"
+                          >
+                            {/* Video Thumbnail Left */}
+                            <div className="relative w-28 sm:w-36 aspect-video rounded-xl overflow-hidden bg-slate-950 shrink-0 shadow-md">
+                              <img 
+                                src={`https://img.youtube.com/vi/${video.videoId}/0.jpg`} 
+                                alt={video.title} 
+                                className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
+                                referrerPolicy="no-referrer"
+                              />
+                              <div className="absolute inset-0 bg-black/25 group-hover:bg-black/0 transition duration-200 flex items-center justify-center">
+                                <div className="w-7 h-7 rounded-full bg-red-600/90 text-white flex items-center justify-center shadow-md transform scale-90 group-hover:scale-100 transition duration-200">
+                                  <Play className="w-3.5 h-3.5 fill-current ml-0.5" />
+                                </div>
+                              </div>
+                              <span className="absolute bottom-1 right-1 bg-black/80 text-[8px] font-mono font-bold text-white px-1 py-0.5 rounded">
+                                12:40
+                              </span>
+                            </div>
+
+                            {/* Metadata Details Right */}
+                            <div className="flex-1 min-w-0 flex flex-col justify-between py-0.5">
+                              <div>
+                                <span className="text-[8px] uppercase font-bold text-red-400 bg-red-950/40 border border-red-900/20 px-2 py-0.5 rounded-full inline-block">
+                                  {video.category}
+                                </span>
+                                <h5 className="font-extrabold text-white text-xs mt-1 line-clamp-2 leading-snug group-hover:text-red-400 transition-colors">
+                                  {video.title}
+                                </h5>
+                              </div>
+                              <div className="text-[9px] text-slate-400 font-semibold space-y-0.5 mt-1">
+                                <p className="truncate">@SikkhoApp • Gautam Tiwari</p>
+                                <p className="flex items-center gap-1.5 text-slate-500">
+                                  <span>{video.views} views</span>
+                                  <span>•</span>
+                                  <span>{new Date(video.uploadedAt).toLocaleDateString()}</span>
+                                </p>
+                              </div>
+                            </div>
+                          </div>
+                        ))
                     )}
-                  </button>
-                  <button
-                    onClick={() => setActivePlayerTab('about')}
-                    className={`py-2 px-4 text-xs font-black uppercase tracking-wider relative transition-colors ${
-                      activePlayerTab === 'about' ? 'text-red-400' : 'text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    About Lesson
-                    {activePlayerTab === 'about' && (
-                      <motion.div layoutId="tabLine" className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-500" />
-                    )}
-                  </button>
+                  </div>
                 </div>
 
-                {/* --- TAB CONTENT CONTAINER --- */}
-                <div className="flex-1 overflow-y-auto p-4 bg-[#0a0520] flex flex-col min-h-[180px] max-h-[350px]">
-                  {activePlayerTab === 'comments' ? (
-                    <div className="flex-1 flex flex-col space-y-4">
-                      {/* Live Comment Entry Input Form */}
-                      <form onSubmit={handleAddComment} className="flex gap-2.5 items-start">
-                        <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-red-600 to-pink-500 flex items-center justify-center text-white text-[11px] font-black uppercase shadow shadow-red-500/10 shrink-0">
-                          {currentUser?.name ? currentUser.name[0] : 'U'}
-                        </div>
-                        <div className="flex-1 relative">
-                          <input
-                            type="text"
-                            value={newCommentText}
-                            onChange={(e) => setNewCommentText(e.target.value)}
-                            placeholder="Add a public in-app comment..."
-                            className="w-full bg-[#150d40] border border-[#2b1f6d]/60 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-400 focus:outline-none focus:border-red-500 transition-colors pr-10"
-                          />
-                          <button
-                            type="submit"
-                            disabled={!newCommentText.trim()}
-                            className="absolute right-1.5 top-1.5 w-7 h-7 bg-red-600 hover:bg-red-700 disabled:bg-[#1f194c] text-white disabled:text-slate-500 rounded-lg flex items-center justify-center transition active:scale-95 shrink-0"
-                          >
-                            <Send className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </form>
+              </div>
 
-                      {/* Comments Feed List */}
-                      <div className="space-y-3.5 overflow-y-auto flex-1 pr-1 select-none">
+              {/* DETAILED COMMENTS SLIDE-UP DRAWER */}
+              <AnimatePresence>
+                {showCommentsDrawer && (
+                  <>
+                    {/* Backdrop */}
+                    <div 
+                      onClick={() => setShowCommentsDrawer(false)}
+                      className="absolute inset-0 z-20 bg-black/60 backdrop-blur-sm"
+                    />
+                    
+                    {/* Sliding Drawer Container */}
+                    <motion.div
+                      initial={{ y: '100%' }}
+                      animate={{ y: 0 }}
+                      exit={{ y: '100%' }}
+                      transition={{ type: 'spring', damping: 25, stiffness: 220 }}
+                      className="absolute bottom-0 left-0 right-0 z-30 bg-[#141414] border-t border-slate-800 rounded-t-3xl h-[70vh] flex flex-col shadow-2xl overflow-hidden"
+                    >
+                      {/* Drawer Header */}
+                      <div className="px-4 py-3.5 border-b border-slate-800 flex items-center justify-between shrink-0 bg-[#161616]">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-black text-white">Comments</span>
+                          <span className="text-[10px] font-black text-slate-300 bg-slate-800 px-2.5 py-0.5 rounded-full">
+                            {activeVideoComments.length}
+                          </span>
+                        </div>
+                        <button
+                          onClick={() => setShowCommentsDrawer(false)}
+                          className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-750 text-slate-300 flex items-center justify-center transition"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+
+                      {/* Live Comment Form */}
+                      <div className="p-4 border-b border-slate-900 shrink-0 bg-[#181818]">
+                        <form onSubmit={handleAddComment} className="flex gap-2.5 items-start">
+                          <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-red-600 to-pink-500 flex items-center justify-center text-white text-[11px] font-black uppercase shadow shadow-red-500/10 shrink-0">
+                            {currentUser?.name ? currentUser.name[0] : 'U'}
+                          </div>
+                          <div className="flex-1 relative">
+                            <input
+                              type="text"
+                              value={newCommentText}
+                              onChange={(e) => setNewCommentText(e.target.value)}
+                              placeholder="Add a public in-app comment..."
+                              className="w-full bg-[#272727] border border-slate-800 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-400 focus:outline-none focus:border-red-500 transition pr-10"
+                            />
+                            <button
+                              type="submit"
+                              disabled={!newCommentText.trim()}
+                              className="absolute right-1.5 top-1.5 w-7 h-7 bg-red-600 hover:bg-red-700 disabled:bg-[#202020] text-white disabled:text-slate-500 rounded-lg flex items-center justify-center transition active:scale-95 shrink-0"
+                            >
+                              <Send className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </form>
+                      </div>
+
+                      {/* Comments Scroll area */}
+                      <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-[#141414]">
                         {activeVideoComments.length === 0 ? (
-                          <div className="text-center py-8 text-slate-500 flex flex-col items-center gap-1.5">
-                            <MessageCircle className="w-8 h-8 text-slate-600" />
+                          <div className="text-center py-12 text-slate-500 flex flex-col items-center gap-1.5">
+                            <MessageCircle className="w-8 h-8 text-slate-600 animate-bounce" />
                             <span className="text-xs font-semibold">No comments yet. Be the first to share your thoughts!</span>
                           </div>
                         ) : (
                           activeVideoComments.map((comment) => {
                             const isOwnComment = currentUser?.uid === comment.userId;
                             return (
-                              <div key={comment.id} className="flex gap-2.5 items-start bg-[#120a3a]/40 p-2.5 rounded-2xl border border-[#231758]/35 hover:bg-[#120a3a]/70 transition-colors group">
-                                <div className="w-7 h-7 rounded-full bg-purple-700/80 flex items-center justify-center text-white text-[10px] font-bold uppercase shrink-0">
+                              <div key={comment.id} className="flex gap-2.5 items-start bg-[#1e1e1e] p-3 rounded-2xl border border-slate-800 hover:bg-[#252525] transition duration-150 group">
+                                <div className="w-7 h-7 rounded-full bg-purple-700 flex items-center justify-center text-white text-[10px] font-bold uppercase shrink-0">
                                   {comment.userName ? comment.userName[0] : 'U'}
                                 </div>
                                 <div className="flex-1 min-w-0">
@@ -1804,7 +2520,7 @@ export default function App() {
                                   </p>
                                 </div>
 
-                                {/* Delete comments option */}
+                                {/* Delete comment option */}
                                 {(isOwnComment || isAdmin) && (
                                   <button
                                     onClick={() => handleDeleteComment(comment.id)}
@@ -1819,53 +2535,12 @@ export default function App() {
                           })
                         )}
                       </div>
-                    </div>
-                  ) : (
-                    /* ABOUT TAB VIEW */
-                    <div className="space-y-4">
-                      <div className="bg-[#120a3a]/50 border border-[#2b1f6d]/40 rounded-2xl p-3 space-y-2 text-xs">
-                        <div className="flex items-center justify-between text-slate-400 font-bold border-b border-[#2b1f6d]/30 pb-2">
-                          <span>• {activePlayingVideo.views + 1} Views</span>
-                          <span>• Uploaded {new Date(activePlayingVideo.uploadedAt).toLocaleDateString()}</span>
-                        </div>
-                        <div className="space-y-1 mt-2 text-slate-300 leading-relaxed font-medium">
-                          <p>
-                            यह प्रीमियम लेसन वीडियो <strong className="text-white">Gautam Tiwari</strong> द्वारा प्रदान किया गया है ताकि आप डिजिटल मार्केटिंग और यूट्यूब ग्रोथ को बिल्कुल फ्री में गहराई से सीख सकें।
-                          </p>
-                          <p className="mt-1">
-                            ऐप के अंदर ही इस वीडियो को लाइक करें, अपने सवाल कमेंट में पूछें और दोस्तों के साथ शेयर करके उनके भी ज्ञान को बढ़ाएं!
-                          </p>
-                        </div>
-                      </div>
+                    </motion.div>
+                  </>
+                )}
+              </AnimatePresence>
 
-                      {/* Complete watching & motivation card */}
-                      <div className="bg-[#120e36]/60 border border-[#231758] p-3 rounded-2xl flex items-center justify-between gap-3">
-                        <div className="flex items-center gap-2.5">
-                          <div className="w-9 h-9 bg-red-600/10 rounded-xl flex items-center justify-center text-red-500 shrink-0">
-                            <Award className="w-5 h-5" />
-                          </div>
-                          <div className="min-w-0">
-                            <h4 className="text-[11px] font-bold text-white leading-none">Practice and Grow!</h4>
-                            <p className="text-[10px] text-slate-400 mt-1 truncate">Learn step-by-step and implement what Gautam Tiwari teaches.</p>
-                          </div>
-                        </div>
-                        <button
-                          onClick={() => {
-                            setActivePlayingVideo(null);
-                            setActivePlayerTab('comments');
-                            setShowRateModal(true);
-                          }}
-                          className="bg-red-600 hover:bg-red-700 text-white font-extrabold text-[10px] py-2 px-3 rounded-xl transition shrink-0"
-                        >
-                          Done Watching
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </motion.div>
-
-              {/* --- CUSTOM IN-APP SHARE MODAL POPUP --- */}
+              {/* CUSTOM SHARE MODAL POPUP DIALOG */}
               <AnimatePresence>
                 {showShareModal && (
                   <div className="absolute inset-0 z-[60] bg-black/85 backdrop-blur-sm flex items-center justify-center p-4">
@@ -1873,39 +2548,38 @@ export default function App() {
                       initial={{ scale: 0.9, opacity: 0 }}
                       animate={{ scale: 1, opacity: 1 }}
                       exit={{ scale: 0.9, opacity: 0 }}
-                      className="bg-[#0f092e] border-2 border-[#37268d] rounded-3xl p-5 w-full max-w-sm space-y-4 shadow-2xl relative"
+                      className="bg-[#181818] border border-slate-800 rounded-3xl p-5 w-full max-w-sm space-y-4 shadow-2xl relative text-left"
                     >
                       <button
                         onClick={() => setShowShareModal(false)}
-                        className="absolute right-3.5 top-3.5 w-7 h-7 bg-[#1c124e] rounded-full flex items-center justify-center text-slate-300 hover:text-white transition"
+                        className="absolute right-3.5 top-3.5 w-7 h-7 bg-[#272727] rounded-full flex items-center justify-center text-slate-300 hover:text-white transition"
                       >
                         <X className="w-3.5 h-3.5" />
                       </button>
 
-                      <div className="text-center space-y-1">
+                      <div className="space-y-1">
                         <h4 className="font-extrabold text-white text-sm">Share Lesson</h4>
                         <p className="text-[10px] text-slate-400">Share with colleagues and friends. Earn bonus points!</p>
                       </div>
 
-                      {/* Direct YouTube Link Copy-paste field */}
-                      <div className="bg-[#150d40] border border-[#30207d] rounded-xl p-2 flex items-center justify-between gap-2">
+                      <div className="bg-[#272727] border border-slate-800 rounded-xl p-2.5 flex items-center justify-between gap-2">
                         <span className="text-[10px] font-mono text-slate-300 truncate flex-1 select-all">
                           https://www.youtube.com/watch?v={activePlayingVideo.videoId}
                         </span>
                         <button
                           onClick={() => {
                             navigator.clipboard.writeText(`https://www.youtube.com/watch?v=${activePlayingVideo.videoId}`);
-                            addPoints(15); // Reward 15 points for sharing
+                            addPoints(15);
                             alert('Link copied! +15 activity points added.');
                           }}
-                          className="bg-red-600 hover:bg-red-700 text-white font-extrabold text-[10px] py-1 px-2.5 rounded-lg transition shrink-0 flex items-center gap-1"
+                          className="bg-red-600 hover:bg-red-700 text-white font-extrabold text-[10px] py-1.5 px-3 rounded-lg transition shrink-0 flex items-center gap-1"
                         >
                           <Copy className="w-3 h-3" />
                           <span>Copy</span>
                         </button>
                       </div>
 
-                      {/* Social Shortcut Buttons */}
+                      {/* Social shortcuts */}
                       <div className="grid grid-cols-4 gap-2 pt-1">
                         {[
                           {
@@ -1953,7 +2627,7 @@ export default function App() {
                               item.action();
                               setShowShareModal(false);
                             }}
-                            className="bg-[#1c124e] hover:bg-[#2c1d7c] p-2.5 rounded-2xl flex flex-col items-center gap-1 transition"
+                            className="bg-[#272727] hover:bg-[#323232] p-2.5 rounded-2xl flex flex-col items-center gap-1 transition"
                           >
                             {item.icon}
                             <span className="text-[9px] font-bold text-slate-300">{item.name}</span>
@@ -1964,7 +2638,9 @@ export default function App() {
                   </div>
                 )}
               </AnimatePresence>
+
             </div>
+            )
           )}
         </AnimatePresence>
 

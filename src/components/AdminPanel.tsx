@@ -88,8 +88,24 @@ export default function AdminPanel({ onClose, onRefreshVideos }: AdminPanelProps
 
   // Extract YouTube ID Helper
   const parseYoutubeId = (url: string) => {
+    if (!url) return null;
+    const cleanUrl = url.trim();
+
+    // Check for shorts first
+    const shortsMatch = cleanUrl.match(/(?:shorts\/)([a-zA-Z0-9_-]{11})/);
+    if (shortsMatch && shortsMatch[1]) {
+      return shortsMatch[1];
+    }
+
+    // Check for standard watch?v= or youtu.be/ or embed/
+    const standardMatch = cleanUrl.match(/(?:v=|\/v\/|embed\/|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
+    if (standardMatch && standardMatch[1]) {
+      return standardMatch[1];
+    }
+
+    // Fallback regex
     const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
-    const match = url.match(regExp);
+    const match = cleanUrl.match(regExp);
     return (match && match[2].length === 11) ? match[2] : null;
   };
 
@@ -362,6 +378,9 @@ export default function AdminPanel({ onClose, onRefreshVideos }: AdminPanelProps
                   >
                     <option value="YouTube Grow Lesson">YouTube Grow Lesson</option>
                     <option value="Let's Earn Money">Let's Earn Money</option>
+                    <option value="Short Video">Short Video</option>
+                    <option value="Music by Gautam">Music by Gautam</option>
+                    <option value="Music by Arvind">Music by Arvind</option>
                   </select>
                 </div>
                 <div>
